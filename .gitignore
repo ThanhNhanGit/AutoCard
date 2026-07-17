@@ -1,0 +1,43 @@
+# Previous repository metadata retained locally as a rollback copy.
+/portable_config/.git-wrong-root-backup-*/
+
+# User-specific AutoCard settings and runtime state.
+/portable_config/autocards/options.json
+/portable_config/autocards/known-words-cache.json
+/portable_config/autocards/frequency-cache.json
+/portable_config/autocards/autocards-subtitle-debug.txt
+/portable_config/autocards/*.tmp
+/portable_config/autocards_temp.json
+
+# mpv and application caches.
+/portable_config/cache/
+/portable_config/watch_later/
+/portable_config/BK/
+/portable_config/autocards-backup-*/
+
+# Backup archives created at the portable_config root. Do not ignore all ZIP
+# files: the embedded Python runtime contains python313.zip.
+/portable_config/*.zip
+
+# Python and test artifacts.
+**/__pycache__/
+*.py[cod]
+.pytest_cache/
+
+# Local environment and secrets.
+.env
+.env.*
+!.env.example
+*.key
+*.pem
+
+# Local agent/editor metadata.
+/.agents/
+/.codex/
+.idea/
+.vscode/
+
+# OS files.
+.DS_Store
+Thumbs.db
+Desktop.ini

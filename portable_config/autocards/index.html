@@ -1,0 +1,1275 @@
+<!DOCTYPE html>
+
+<head>
+  <meta charset="UTF-8" />
+  <title>Autocards</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Shippori+Mincho&display=swap" rel="stylesheet">
+  <link
+    href="https://fonts.googleapis.com/css2?family=Inter:ital,opsz,wght@0,14..32,100..900;1,14..32,100..900&family=Shippori+Mincho&display=swap"
+    rel="stylesheet">
+
+  <!-- Local morphological analyzer (kuromoji.js). Served by the Autocards
+       server from ./vendor; no network access and no changes to AnkiConnect. -->
+  <script src="/vendor/kuromoji.js"></script>
+
+  <script>
+    /* ---- shared subtitle analysis (mirrors the Node-tested analyze.js) ---- */
+    const CONTENT_POS = { '名詞': 1, '動詞': 1, '形容詞': 1, '副詞': 1 };
+    const SKIP_DETAIL = { '非自立': 1, '接尾': 1, '代名詞': 1, '数': 1, '固有名詞': 1 };
+
+    function isContentToken(tok) {
+      return !!CONTENT_POS[tok.pos] && !SKIP_DETAIL[tok.pos_detail_1];
+    }
+    function lemmaOf(tok) {
+      return (tok.basic_form && tok.basic_form !== '*') ? tok.basic_form : tok.surface_form;
+    }
+    function isKnownToken(tok, known) {
+      return known.has(lemmaOf(tok)) || known.has(tok.surface_form);
+    }
+    function analyzeTokens(tokens, known) {
+      const spans = [];
+      const unknown = new Map();
+      let contentCount = 0;
+      for (const tok of tokens) {
+        const content = isContentToken(tok);
+        let state = 'plain';
+        if (content) {
+          contentCount += 1;
+          if (isKnownToken(tok, known)) {
+            state = 'known';
+          } else {
+            state = 'unknown';
+            const lemma = lemmaOf(tok);
+            if (!unknown.has(lemma))
+              unknown.set(lemma, { lemma, reading: (tok.reading && tok.reading !== '*') ? tok.reading : '', surface: tok.surface_form });
+          }
+        }
+        spans.push({ surface: tok.surface_form, state, lemma: content ? lemmaOf(tok) : null });
+      }
+      return { spans, unknownLemmas: Array.from(unknown.values()), unknownCount: unknown.size, contentCount };
+    }
+    function lineCategory(contentCount, unknownCount) {
+      if (contentCount === 0) return 'empty';
+      if (unknownCount === 0) return 'known';
+      if (unknownCount === 1) return 'nplusone';
+      return 'learn';
+    }
+
+    /* ---- state ---- */
+    let knownSet = new Set();
+    let knownVersion = 0;
+    let knownWordCount = 0;
+    let knownReady = false;
+    let knownError = '';
+    let knownWatchStarted = false;
+
+    let freqRanks = null;    // term -> rank (1 = most common); null until loaded
+    let freqVersion = -1;
+    let freqEnabled = false;
+    let freqStatusText = '';
+
+    let tokenizerWorker = null;
+    let mainTokenizer = null;       // main-thread fallback if Workers are unavailable
+    let tokenizerState = 'loading'; // loading | ready | error
+    let workerReqId = 0;
+    const workerPending = new Map();
+    let tokenizing = false;
+
+    let lineEls = [];        // container element per line index
+    let lineTextLines = [];  // raw sublines per line index
+    let lineTokens = [];     // [[tokens per subline]] per line index
+    let lineCats = [];       // category string per line index
+    let lineTargets = [];    // mining target lemma per line index
+    let lineUnknowns = [];   // [{lemma,...}] unknown content words per line index
+    let userTargets = new Set(); // indices whose target the user picked explicitly
+    let selected = new Set();
+    let mergedGroups = []; // [{anchor, members:[indices]}] lines merged into one for Yomitan mining
+    let nplusFilterActive = false; // "Focus N+1" toggle: collapses non-N+1 lines out of view
+    let linesGeneration = 0; // bumped by readLines() so an in-flight tokenize call can detect it's stale
+
+    let subId;
+    let times = [];
+    let idx;
+
+    /* ---- element refs ---- */
+    let activeIndicatorElm, linesContainerElm, linesElm, blankElm;
+    let deckElm, sentenceElm, expressionElm, pictureElm, audioElm, prevLinesElm, nextLinesElm, knownDecksElm, modelElm, freqPathElm;
+    let knownWordsStatusElm, nplusCountElm, mineBtnElm, mergeBtnElm, freqStatusElm, nplusFilterBtnElm;
+
+    function bisectLeft(a, v) {
+      let lo = 0, hi = a.length;
+      while (lo < hi) {
+        const mid = (lo + hi) >> 1;
+        if (a[mid] < v) lo = mid + 1; else hi = mid;
+      }
+      return lo;
+    }
+
+    function init() {
+      activeIndicatorElm = document.querySelector('.active-indicator');
+      linesContainerElm = document.querySelector('.lines-container');
+      linesElm = document.querySelector('.lines');
+      blankElm = document.querySelector('.blank');
+
+      deckElm = document.getElementById('field-deck');
+      sentenceElm = document.getElementById('field-sentence');
+      expressionElm = document.getElementById('field-expression');
+      pictureElm = document.getElementById('field-picture');
+      audioElm = document.getElementById('field-audio');
+      prevLinesElm = document.getElementById('field-prev-lines');
+      nextLinesElm = document.getElementById('field-next-lines');
+      knownDecksElm = document.getElementById('field-known-decks');
+      modelElm = document.getElementById('field-model');
+      freqPathElm = document.getElementById('field-freq-path');
+
+      knownWordsStatusElm = document.getElementById('known-words-status');
+      nplusCountElm = document.getElementById('nplus-count');
+      mineBtnElm = document.getElementById('mine-btn');
+      mergeBtnElm = document.getElementById('merge-btn');
+      freqStatusElm = document.getElementById('freq-status');
+      nplusFilterBtnElm = document.getElementById('nplus-filter-btn');
+
+      linesElm.addEventListener('click', onLineClick);
+    }
+
+    /* ---- known-word cache ---- */
+    function updateKnownStatus(overrideMsg, isError) {
+      if (!knownWordsStatusElm) return;
+      if (overrideMsg !== undefined) {
+        knownWordsStatusElm.textContent = overrideMsg;
+        knownWordsStatusElm.classList.toggle('error', !!isError);
+        return;
+      }
+      let s = `Known: ${knownWordCount}`;
+      if (knownError) s += ` (${knownError})`;
+      else if (!knownReady) s += ' (syncing…)';
+      else if (tokenizerState === 'loading') s += ' · parsing…';
+      else if (tokenizerState === 'error') s += ' · tokenizer failed';
+      knownWordsStatusElm.textContent = s;
+      knownWordsStatusElm.classList.toggle('error', !!knownError || tokenizerState === 'error');
+    }
+
+    async function loadKnownWords() {
+      try {
+        const response = await fetch('/known-words', { cache: 'no-store' });
+        const data = await response.json();
+        knownVersion = data.version || 0;
+        knownWordCount = data.count || 0;
+        knownReady = !!data.ready;
+        knownError = data.error || '';
+        knownSet = new Set(data.words || []);
+        updateKnownStatus();
+        refreshHighlighting();
+      } catch (error) {
+        updateKnownStatus('Known cache unavailable', true);
+      }
+    }
+
+    async function watchKnownWords() {
+      if (knownWatchStarted) return;
+      knownWatchStarted = true;
+      while (true) {
+        try {
+          const response = await fetch(`/known-words/wait?version=${knownVersion}`, { cache: 'no-store' });
+          const data = await response.json();
+          if (data.version !== knownVersion) await loadKnownWords();
+        } catch (_) {
+          await new Promise(resolve => setTimeout(resolve, 1000));
+        }
+      }
+    }
+
+    async function rebuildKnownWords() {
+      updateKnownStatus(`Known: ${knownWordCount} (rebuilding…)`);
+      try { await fetch('/known-words/rebuild', { method: 'POST' }); }
+      catch (_) { updateKnownStatus('Could not start rebuild', true); }
+    }
+
+    /* ---- frequency dictionary (optional; tints unknown words by commonness) ---- */
+    function freqBand(rank) {
+      if (rank == null) return 0;      // not in dict / beyond topX -> "rare"
+      if (rank <= 1500) return 1;
+      if (rank <= 5000) return 2;
+      if (rank <= 15000) return 3;
+      return 4;
+    }
+
+    function updateFreqStatus() {
+      if (!freqStatusElm) return;
+      freqStatusElm.textContent = freqStatusText;
+      freqStatusElm.style.display = freqStatusText ? '' : 'none';
+    }
+
+    async function loadFrequency(attempt = 0) {
+      let status;
+      try {
+        status = await (await fetch('/frequency', { cache: 'no-store' })).json();
+      } catch (_) {
+        freqStatusText = ''; updateFreqStatus(); return;
+      }
+      freqEnabled = !!status.enabled;
+      if (!status.enabled) {
+        freqRanks = null; freqVersion = -1; freqStatusText = '';
+        updateFreqStatus(); reRenderForFreq(); return;
+      }
+      if (status.error) {
+        freqStatusText = `Freq: ${status.error}`; updateFreqStatus(); return;
+      }
+      if (status.building || !status.ready) {
+        freqStatusText = 'Freq: building…'; updateFreqStatus();
+        if (attempt < 60) setTimeout(() => loadFrequency(attempt + 1), 1500);
+        return;
+      }
+      if (status.version !== freqVersion || !freqRanks) {
+        try {
+          const data = await (await fetch('/frequency/ranks', { cache: 'no-store' })).json();
+          freqRanks = data.ranks || {};
+          freqVersion = data.version;
+        } catch (_) { return; }
+      }
+      freqStatusText = `Freq: ${status.count}`;
+      updateFreqStatus();
+      reRenderForFreq();
+    }
+
+    function reRenderForFreq() {
+      lineEls.forEach((el) => { if (el) el.dataset.sig = ''; });
+      if (tokenizerState === 'ready' && lineTextLines.length && lineTokens.length === lineTextLines.length)
+        analyzeAndRenderAll();
+    }
+
+    /* ---- tokenizer (runs in a Web Worker so the ~13 MB dictionary inflate +
+       trie build never block the UI thread; falls back to the main thread) ---- */
+    function startTokenizer() {
+      if (typeof Worker !== 'undefined') {
+        try {
+          tokenizerWorker = new Worker('/vendor/tokenizer-worker.js');
+          tokenizerWorker.onmessage = (e) => {
+            const d = e.data;
+            if (d.type === 'ready') {
+              tokenizerState = 'ready';
+              updateKnownStatus();
+              refreshHighlighting();
+            } else if (d.type === 'tokens') {
+              const resolve = workerPending.get(d.id);
+              if (resolve) { workerPending.delete(d.id); resolve(d.result); }
+            } else if (d.type === 'error') {
+              console.error('tokenizer worker error:', d.message);
+              tokenizerWorker = null;
+              startTokenizerMainThread();
+            }
+          };
+          tokenizerWorker.onerror = (err) => {
+            if (tokenizerState === 'ready') return;
+            console.error('tokenizer worker failed, using main thread:', err.message || err);
+            tokenizerWorker = null;
+            startTokenizerMainThread();
+          };
+          return;
+        } catch (e) {
+          tokenizerWorker = null;
+        }
+      }
+      startTokenizerMainThread();
+    }
+
+    function startTokenizerMainThread() {
+      if (typeof kuromoji === 'undefined') {
+        tokenizerState = 'error';
+        updateKnownStatus();
+        return;
+      }
+      kuromoji.builder({ dicPath: '/vendor/dict' }).build((err, tk) => {
+        if (err) {
+          console.error('kuromoji build failed', err);
+          tokenizerState = 'error';
+          updateKnownStatus();
+          return;
+        }
+        mainTokenizer = tk;
+        tokenizerState = 'ready';
+        updateKnownStatus();
+        refreshHighlighting();
+      });
+    }
+
+    function trimToken(t) {
+      return { surface_form: t.surface_form, pos: t.pos, pos_detail_1: t.pos_detail_1, basic_form: t.basic_form, reading: t.reading };
+    }
+
+    function tokenizeLines(lines) {
+      if (tokenizerWorker) {
+        return new Promise((resolve) => {
+          const id = ++workerReqId;
+          workerPending.set(id, resolve);
+          tokenizerWorker.postMessage({ type: 'tokenize', id, lines });
+        });
+      }
+      return Promise.resolve(lines.map(subs => subs.map(s => mainTokenizer.tokenize(s).map(trimToken))));
+    }
+
+    /* ---- analysis + rendering ---- */
+    async function refreshHighlighting() {
+      if (tokenizerState !== 'ready' || !lineTextLines.length) return;
+      if (lineTokens.length !== lineTextLines.length) {
+        if (tokenizing) return;
+        tokenizing = true;
+        const gen = linesGeneration;
+        let tokens;
+        try {
+          tokens = await tokenizeLines(lineTextLines);
+        } finally {
+          tokenizing = false;
+        }
+        if (gen !== linesGeneration) {
+          // A newer video's readLines() reset the line arrays while this was
+          // tokenizing the OLD ones — applying this result now would paint
+          // wrong-length/wrong-text tokens onto the new lines. Discard it and
+          // re-run for whatever is current instead.
+          refreshHighlighting();
+          return;
+        }
+        lineTokens = tokens;
+      }
+      analyzeAndRenderAll();
+    }
+
+    function analyzeAndRenderAll() {
+      let nplus = 0;
+      for (let i = 0; i < lineTextLines.length; i++) {
+        const subAnalyses = lineTokens[i].map(toks => analyzeTokens(toks, knownSet));
+        let content = 0;
+        const unknownMap = new Map();
+        for (const a of subAnalyses) {
+          content += a.contentCount;
+          for (const u of a.unknownLemmas) if (!unknownMap.has(u.lemma)) unknownMap.set(u.lemma, u);
+        }
+        const cat = lineCategory(content, unknownMap.size);
+        lineCats[i] = cat;
+        lineUnknowns[i] = [...unknownMap.values()];
+        if (!userTargets.has(i))
+          lineTargets[i] = bestFreqLemma(lineUnknowns[i]) || lineTextLines[i].join('');
+        if (cat === 'nplusone') nplus++;
+
+        const sig = cat + '|' + subAnalyses.map(a => a.spans.map(s => s.state[0]).join('')).join('/');
+        if (lineEls[i].dataset.sig !== sig) {
+          renderLineSpans(i, subAnalyses);
+          applyCategory(i, cat);
+          lineEls[i].dataset.sig = sig;
+        }
+      }
+      nplusCountElm.textContent = `N+1: ${nplus}`;
+      refreshSelectionUI();
+      applyMerges();
+      applyNPlusFilter();
+    }
+
+    function renderLineSpans(i, subAnalyses) {
+      const textElm = lineEls[i].querySelector('.subtitle-text');
+      const frag = document.createDocumentFragment();
+      subAnalyses.forEach((a, si) => {
+        if (si > 0) frag.appendChild(document.createElement('br'));
+        for (const sp of a.spans) {
+          if (sp.state === 'plain') {
+            frag.appendChild(document.createTextNode(sp.surface));
+          } else {
+            const el = document.createElement('span');
+            el.className = sp.state === 'known' ? 'known-word' : 'unknown-word';
+            if (sp.lemma) el.dataset.lemma = sp.lemma;
+            el.textContent = sp.surface;
+            if (sp.state === 'known') {
+              el.title = 'Known · Alt+click to unmark';
+            } else if (freqRanks) {
+              const rank = freqRanks[sp.lemma] ?? freqRanks[sp.surface];
+              const band = freqBand(rank);
+              el.classList.add(band ? 'freq-' + band : 'freq-rare');
+              el.title = (rank != null ? `Frequency rank #${rank}` : 'Rare / not in frequency list')
+                + ' · Alt+click = I already know this';
+            } else {
+              el.title = 'Alt+click = I already know this';
+            }
+            frag.appendChild(el);
+          }
+        }
+      });
+      textElm.textContent = '';
+      textElm.appendChild(frag);
+    }
+
+    function applyCategory(i, cat) {
+      const el = lineEls[i];
+      el.classList.remove('cat-known', 'cat-nplusone', 'cat-learn', 'cat-empty');
+      el.classList.add('cat-' + cat);
+    }
+
+    // Pick the most common unknown word (lowest frequency rank) as the default
+    // mining target, so batch-mine never grabs a "random" word.
+    function bestFreqLemma(unknowns) {
+      if (!unknowns || !unknowns.length) return null;
+      if (!freqRanks) return unknowns[0].lemma;
+      let best = unknowns[0].lemma, bestRank = Infinity;
+      for (const u of unknowns) {
+        const r = freqRanks[u.lemma];
+        const rr = (r == null) ? Infinity : r;
+        if (rr < bestRank) { bestRank = rr; best = u.lemma; }
+      }
+      return best;
+    }
+
+    function defaultTarget(i) {
+      return bestFreqLemma(lineUnknowns[i]) || (lineTextLines[i] || []).join('');
+    }
+
+    // Outline the word that will be mined for a selected line (Migaku-style),
+    // so it's always clear which word goes on the card.
+    function applyTargetRing(i) {
+      const el = lineEls[i];
+      if (!el) return;
+      const spans = el.querySelectorAll('.known-word, .unknown-word');
+      spans.forEach(s => s.classList.remove('mine-target'));
+      if (!selected.has(i)) return;
+      const target = lineTargets[i];
+      if (!target) return;
+      for (const s of spans) {
+        if (s.dataset.lemma === target) { s.classList.add('mine-target'); break; }
+      }
+    }
+
+    /* ---- selection + mining ---- */
+    function setMineBtn() {
+      mineBtnElm.textContent = `Mine (${selected.size})`;
+      mineBtnElm.disabled = selected.size === 0;
+      if (mergeBtnElm) {
+        mergeBtnElm.textContent = `Merge (${selected.size})`;
+        mergeBtnElm.disabled = selected.size < 2;
+      }
+    }
+    function deselect(i) {
+      selected.delete(i);
+      userTargets.delete(i);
+    }
+    function selectLine(i, target) {
+      selected.add(i);
+      if (target) { lineTargets[i] = target; userTargets.add(i); }
+      else if (!userTargets.has(i)) { lineTargets[i] = defaultTarget(i); }
+    }
+    function toggleSelect(i) {
+      if (selected.has(i)) deselect(i); else selectLine(i);
+      lineEls[i].classList.toggle('selected', selected.has(i));
+      applyTargetRing(i);
+      setMineBtn();
+    }
+    function refreshSelectionUI() {
+      lineEls.forEach((el, i) => {
+        if (!el) return;
+        el.classList.toggle('selected', selected.has(i));
+        applyTargetRing(i);
+      });
+      setMineBtn();
+    }
+    // Merged lines are reserved for Yomitan hover-mining (see onLineClick's
+    // isMergedAnchor guard) — exclude them here too, or a merge anchor that's
+    // still categorized nplusone gets batch-selected and mined a second time.
+    function nplusOneEligible(i) {
+      return lineCats[i] === 'nplusone' && !isMergedAnchor(i)
+        && !(lineEls[i] && lineEls[i].classList.contains('merged-away'));
+    }
+    function selectAllNPlusOne() {
+      const allSelected = lineCats.every((c, i) => !nplusOneEligible(i) || selected.has(i))
+        && [...selected].every(i => nplusOneEligible(i)) && selected.size > 0;
+      selected.clear(); userTargets.clear();
+      if (!allSelected) lineCats.forEach((c, i) => { if (nplusOneEligible(i)) selected.add(i); });
+      refreshSelectionUI();
+    }
+    function clearSelection() {
+      selected.clear(); userTargets.clear();
+      refreshSelectionUI();
+    }
+
+    /* ---- merge lines for Yomitan mining ----
+       Merge renders the selected lines as ONE continuous line (all their tokens
+       in the anchor, the rest hidden) and registers the group with the server.
+       You then hover a word with Yomitan as usual: Yomitan supplies the
+       definition, and /check enriches the card with the combined sentence +
+       gap-dropped audio spanning those lines. */
+    function isMergedAnchor(i) {
+      return mergedGroups.some(g => g.anchor === i);
+    }
+
+    function applyMerges() {
+      lineEls.forEach(el => el && el.classList.remove('merged-anchor', 'merged-away'));
+      for (const g of mergedGroups) {
+        const anchor = lineEls[g.anchor];
+        if (!anchor) continue;
+        const combined = [];
+        g.members.forEach(i => (lineTokens[i] || []).forEach(toks => combined.push(analyzeTokens(toks, knownSet))));
+        if (combined.length) {
+          // Render as ONE unbroken run — NOT combined as-is, which would give
+          // renderLineSpans one entry per subline and insert a <br> between
+          // them. Yomitan's sentence scanner stops at <br> (subtitle overlays
+          // rely on that so hovering one caption row doesn't pull in the
+          // next), so a merged "sentence" has to be one continuous text flow
+          // or Yomitan only captures whichever side of the break you hovered.
+          renderLineSpans(g.anchor, [{ spans: combined.flatMap(a => a.spans) }]);
+          // Recompute the anchor's own category/unknowns/target from the
+          // COMBINED tokens — otherwise lineCats[anchor] (and its CSS class,
+          // and the word bestFreqLemma would ring for mining) stay whatever
+          // they were for the anchor's single pre-merge line, mismatching
+          // what's now actually displayed.
+          let content = 0;
+          const unknownMap = new Map();
+          for (const a of combined) {
+            content += a.contentCount;
+            for (const u of a.unknownLemmas) if (!unknownMap.has(u.lemma)) unknownMap.set(u.lemma, u);
+          }
+          const cat = lineCategory(content, unknownMap.size);
+          lineCats[g.anchor] = cat;
+          lineUnknowns[g.anchor] = [...unknownMap.values()];
+          if (!userTargets.has(g.anchor)) {
+            lineTargets[g.anchor] = bestFreqLemma(lineUnknowns[g.anchor])
+              || g.members.map(i => (lineTextLines[i] || []).join('')).join('');
+          }
+          applyCategory(g.anchor, cat);
+        }
+        anchor.classList.add('merged-anchor');
+        const box = anchor.querySelector('.line-box');
+        if (box) box.title = 'Merged for mining — hover a word with Yomitan · click the timestamp to unmerge';
+        g.members.forEach(i => { if (i !== g.anchor && lineEls[i]) lineEls[i].classList.add('merged-away'); });
+      }
+    }
+
+    async function mergeLines() {
+      if (selected.size < 2) return;
+      const idxs = [...selected].sort((a, b) => a - b);
+      try {
+        const r = await (await fetch('/merge', {
+          method: 'POST', headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ indices: idxs })
+        })).json();
+        if (!r || !r.ok) { updateKnownStatus('Merge failed', true); return; }
+      } catch (_) { updateKnownStatus('Merge failed', true); return; }
+      clearSelection();
+      mergedGroups.push({ anchor: idxs[0], members: idxs });
+      applyMerges();
+      applyNPlusFilter();
+      updateKnownStatus('Merged — hover a word to mine it with Yomitan');
+      setTimeout(updateKnownStatus, 3000);
+    }
+
+    function unmergeAt(i) {
+      const gi = mergedGroups.findIndex(g => g.anchor === i);
+      if (gi < 0) return;
+      const g = mergedGroups[gi];
+      mergedGroups.splice(gi, 1);
+      fetch('/unmerge', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ indices: g.members })
+      }).catch(() => {});
+      g.members.forEach(idx => { if (lineEls[idx]) lineEls[idx].dataset.sig = ''; });
+      analyzeAndRenderAll();
+    }
+
+    /* ---- "Focus N+1" filter: collapse every line that isn't N+1 (or actively
+       merged) out of view, with a fade + height-collapse animation, so you can
+       scroll straight from one mineable line to the next instead of stepping
+       through the whole episode. Purely a view filter — selection/mining/merge
+       state is untouched, and it layers on top of the existing playback-reveal
+       (`hidden`) and merge (`merged-away`) hiding without fighting either. */
+    function toggleNPlusFilter() {
+      nplusFilterActive = !nplusFilterActive;
+      if (nplusFilterBtnElm) nplusFilterBtnElm.classList.toggle('active', nplusFilterActive);
+      applyNPlusFilter();
+    }
+
+    const FILTER_ANIM_MS = 280; // must match .sub-line's max-height transition duration below
+
+    function updateLineVisibility(el, hide) {
+      // A setTimeout (not transitionend) finalizes the discrete step (display:none
+      // or clearing max-height): transitionend can simply never fire — e.g. while
+      // the window is unfocused/backgrounded the browser may skip running the
+      // transition rather than animate it invisibly — which would otherwise leave
+      // the line stuck mid-collapse, still eating a flex gap, forever.
+      //
+      // The no-op checks below MUST run before the token is bumped: applyNPlusFilter()
+      // re-runs on every unrelated re-render (known-word sync, tokenizer-ready,
+      // merge/unmerge), so this is very often called again mid-animation with
+      // the SAME hide value. Bumping the token on that redundant call — even
+      // though it then no-ops — would orphan the in-flight timeout below (its
+      // captured token stops matching) with no replacement ever scheduled,
+      // permanently stranding the line mid-transition.
+      if (hide) {
+        if (el.classList.contains('filter-hide')) return;
+        const token = (el._filterToken = (el._filterToken || 0) + 1);
+        if (el.hidden) { el.classList.add('filter-hide'); el.style.display = 'none'; return; } // not rendered anyway — skip the animation
+        el.style.maxHeight = el.getBoundingClientRect().height + 'px';
+        void el.offsetHeight; // commit that starting height before animating, or the transition has no "from"
+        el.classList.add('filter-hide');
+        el.style.maxHeight = '0px';
+        setTimeout(() => {
+          if (el._filterToken === token && el.classList.contains('filter-hide')) el.style.display = 'none';
+        }, FILTER_ANIM_MS);
+      } else {
+        if (!el.classList.contains('filter-hide')) return;
+        const token = (el._filterToken = (el._filterToken || 0) + 1);
+        el.style.display = '';
+        // scrollHeight ignores the clipping max-height still in effect, so this
+        // is the line's true natural height to animate open toward.
+        el.style.maxHeight = el.scrollHeight + 'px';
+        el.classList.remove('filter-hide');
+        setTimeout(() => {
+          if (el._filterToken === token && !el.classList.contains('filter-hide')) el.style.maxHeight = ''; // stop capping future re-renders
+        }, FILTER_ANIM_MS);
+      }
+    }
+
+    function applyNPlusFilter() {
+      linesElm.classList.toggle('nplus-filter', nplusFilterActive);
+      lineEls.forEach((el, i) => {
+        if (!el) return;
+        const exempt = isMergedAnchor(i) || el.classList.contains('merged-away');
+        const hide = nplusFilterActive && !exempt && lineCats[i] !== 'nplusone';
+        updateLineVisibility(el, hide);
+      });
+    }
+
+    function onLineClick(ev) {
+      const lineEl = ev.target.closest('.sub-line');
+      if (!lineEl) return;
+      const i = +lineEl.dataset.idx;
+      const wordEl = ev.target.closest('.known-word, .unknown-word');
+
+      // Merged lines are for Yomitan hover-mining, not batch selection.
+      // Alt+click still marks a word known; clicking the timestamp unmerges.
+      if (isMergedAnchor(i)) {
+        if (ev.altKey && wordEl && wordEl.dataset.lemma) {
+          markWord(wordEl.dataset.lemma, wordEl.classList.contains('unknown-word'));
+          ev.preventDefault();
+        } else if (ev.target.tagName === 'P') {
+          unmergeAt(i);
+        }
+        return;
+      }
+
+      // Alt+click a word toggles its known status.
+      if (ev.altKey && wordEl && wordEl.dataset.lemma) {
+        markWord(wordEl.dataset.lemma, wordEl.classList.contains('unknown-word'));
+        ev.preventDefault();
+        return;
+      }
+
+      // Click a word: select the line and make that word the mining target.
+      // Clicking the current target word again deselects the line.
+      if (wordEl && wordEl.dataset.lemma) {
+        const lemma = wordEl.dataset.lemma;
+        if (selected.has(i) && lineTargets[i] === lemma) deselect(i);
+        else selectLine(i, lemma);
+      } else {
+        // Click elsewhere on the line: toggle selection with the default target.
+        toggleSelect(i);
+        return;
+      }
+      lineEls[i].classList.toggle('selected', selected.has(i));
+      applyTargetRing(i);
+      setMineBtn();
+    }
+
+    async function markWord(lemma, known) {
+      if (!lemma) return;
+      try {
+        await fetch('/known-words/mark', {
+          method: 'POST', headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ word: lemma, known })
+        });
+      } catch (_) { /* version bump drives the re-highlight */ }
+    }
+
+    async function mineSelected(merge = false) {
+      if (!selected.size) return;
+      if (merge && selected.size < 2) return;
+      const requestSubId = subId; // so a completion after switching videos doesn't touch the NEW video's state
+      const idxs = [...selected].sort((a, b) => a - b);
+      const items = idxs.map(i => ({ index: i, expression: lineTargets[i] || '' }));
+      mineBtnElm.disabled = true;
+      if (mergeBtnElm) mergeBtnElm.disabled = true;
+      updateKnownStatus(merge ? `Merging ${idxs.length}…` : `Mining ${idxs.length}…`);
+      try {
+        const response = await fetch('/mine', {
+          method: 'POST', headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ items, merge })
+        });
+        const data = await response.json();
+        const staleVideo = subId !== requestSubId;
+        if (data.error) {
+          if (!staleVideo) updateKnownStatus(data.error, true);
+        } else if (!staleVideo) {
+          idxs.forEach(i => lineEls[i] && lineEls[i].classList.remove('selected'));
+          clearSelection();
+          let msg = merge ? `Merged ${data.created} card` : `Mined ${data.created}`;
+          if (data.skipped) msg += `, ${data.skipped} dup`;
+          if (data.errors && data.errors.length) msg += `, ${data.errors.length} err`;
+          updateKnownStatus(msg);
+          setTimeout(updateKnownStatus, 2500);
+        }
+      } catch (_) {
+        if (subId === requestSubId) updateKnownStatus(merge ? 'Merge failed' : 'Mining failed', true);
+      }
+      setMineBtn(); // always resync button state/label to whatever is currently selected
+    }
+
+    /* ---- playback sync (unchanged behaviour) ---- */
+    let active = false;
+    let updateInterval, checkInterval;
+
+    function setActive(newActive) {
+      if (active === newActive) return;
+      activeIndicatorElm.style.backgroundColor = newActive ? 'var(--color-green-500)' : 'var(--color-red-500)';
+      active = newActive;
+    }
+
+    function setHidden(lo, hi, hidden) {
+      Array.prototype.slice.call(linesElm.children, lo, hi).forEach((elm) => {
+        if (hidden) elm.hidden = true; else elm.removeAttribute('hidden');
+      });
+    }
+
+    function scrollInfo(elm) {
+      const sh = elm.scrollHeight, st = elm.scrollTop, oh = elm.offsetHeight;
+      return oh === 0 || st === sh - oh;
+    }
+
+    function updateLines(t) {
+      const newIdx = bisectLeft(times, t);
+      const atBottom = scrollInfo(linesContainerElm);
+      let hidden = idx > newIdx, lo = Math.min(newIdx, idx), hi = Math.max(newIdx, idx);
+      setHidden(lo, hi, hidden);
+      if (idx === 0 || lo != hi && atBottom)
+        blankElm.scrollIntoView({ behavior: hi - lo > 10 ? 'instant' : 'smooth', block: 'end' });
+      idx = newIdx;
+    }
+
+    function update() {
+      if (document.hidden) return;
+      fetch('/update')
+        .then(r => r.json())
+        .then(([id, t]) => {
+          setActive(true);
+          if (subId !== id) { readLines(); return; }
+          updateLines(t);
+        })
+        .catch(() => setActive(false));
+    }
+
+    function check() {
+      if (document.hidden) return;
+      fetch('/check', { method: 'POST' });
+    }
+
+    function buildLine(frag, textLines, tsStr, i) {
+      const container = document.createElement('div');
+      container.className = 'sub-line';
+      container.hidden = true;
+      container.dataset.idx = i;
+      frag.appendChild(container);
+
+      const timeElm = document.createElement('p');
+      timeElm.textContent = tsStr;
+      container.appendChild(timeElm);
+
+      const box = document.createElement('div');
+      box.className = 'line-box';
+      container.appendChild(box);
+
+      const textElm = document.createElement('span');
+      textElm.className = 'subtitle-text';
+      textLines.forEach((s, si) => {
+        if (si > 0) textElm.appendChild(document.createElement('br'));
+        textElm.appendChild(document.createTextNode(s));
+      });
+      box.appendChild(textElm);
+
+      lineEls[i] = container;
+      lineTextLines[i] = textLines;
+    }
+
+    function readLines() {
+      if (updateInterval) clearInterval(updateInterval);
+      if (checkInterval) clearInterval(checkInterval);
+
+      fetch('/lines')
+        .then(r => r.json())
+        .then(({ id, lines }) => {
+          setActive(true);
+          subId = id;
+
+          lineEls = []; lineTextLines = []; lineTokens = []; lineCats = []; lineTargets = [];
+          lineUnknowns = [];
+          mergedGroups = [];
+          linesGeneration++;
+          selected.clear(); userTargets.clear();
+          setMineBtn();
+          nplusCountElm.textContent = 'N+1: —';
+
+          const frag = document.createDocumentFragment();
+          times = lines.map(([textLines, ts, tsStr], i) => {
+            buildLine(frag, textLines, tsStr, i);
+            return ts;
+          });
+          idx = 0;
+
+          linesElm.innerHTML = '';
+          linesElm.appendChild(frag);
+
+          refreshHighlighting();
+
+          updateInterval = setInterval(update, 250);
+          checkInterval = setInterval(check, 1500);
+        });
+    }
+
+    function onLoad() {
+      init();
+
+      fetch('/options')
+        .then(r => r.json())
+        .then(opts => {
+          if (!opts.deck) {
+            document.getElementById('settings').showPopover();
+          } else {
+            deckElm.value = opts.deck;
+            sentenceElm.value = opts.sentence;
+            expressionElm.value = opts.expression;
+            pictureElm.value = opts.picture;
+            audioElm.value = opts.audio;
+            prevLinesElm.value = opts.prev_lines || 0;
+            nextLinesElm.value = opts.next_lines || 0;
+            knownDecksElm.value = opts.known_decks || '';
+            modelElm.value = opts.model || '';
+            freqPathElm.value = opts.freq_path || '';
+          }
+        });
+
+      startTokenizer();
+      loadKnownWords().then(watchKnownWords);
+      loadFrequency();
+      readLines();
+    }
+
+    function updateOptions() {
+      fetch('/options', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          deck: deckElm.value,
+          sentence: sentenceElm.value,
+          expression: expressionElm.value,
+          picture: pictureElm.value,
+          audio: audioElm.value,
+          prev_lines: parseInt(prevLinesElm.value) || 0,
+          next_lines: parseInt(nextLinesElm.value) || 0,
+          known_decks: knownDecksElm.value,
+          model: modelElm.value,
+          freq_path: freqPathElm.value,
+        })
+      }).then(() => loadFrequency()).catch(() => {});
+    }
+
+    function toggleAnim() {
+      const style = window.universal.style;
+      const b = style.transitionProperty === '';
+      style.transitionProperty = b ? 'color, background-color, border-color, text-decoration-color, fill, stroke' : '';
+      style.transitionTimingFunction = b ? 'cubic-bezier(0.4, 0, 0.2, 1)' : '';
+      style.transitionDuration = b ? '150ms' : '';
+    }
+
+    function toggleTheme() {
+      toggleAnim();
+      const style = document.documentElement.style;
+      let colorScheme = style.getPropertyValue('color-scheme');
+      if (colorScheme === '') {
+        colorScheme = window.matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light';
+      }
+      style.setProperty('color-scheme', colorScheme === 'dark' ? 'light' : 'dark');
+      setTimeout(toggleAnim, 0);
+    }
+
+    (function () {
+      const style = document.querySelector('head').appendChild(document.createElement('style'));
+      const styleSheet = document.styleSheets[document.styleSheets.length - 1];
+      styleSheet.insertRule("* {}", 0);
+      window.universal = styleSheet.cssRules[0];
+      toggleAnim();
+    })();
+  </script>
+
+  <style>
+    :root {
+      color-scheme: light dark;
+
+      --color-red-500: oklch(0.637 0.237 25.331);
+      --color-green-500: oklch(0.723 0.219 149.579);
+
+      --cb: light-dark(white, black);
+      --cf: light-dark(black, white);
+      --c1: light-dark(hsl(0, 0%, 90%), hsl(0, 0%, 10%));
+      --c2: light-dark(hsl(0, 0%, 80%), hsl(0, 0%, 20%));
+      --c3: light-dark(hsl(0, 0%, 70%), hsl(0, 0%, 30%));
+      --c4: light-dark(hsl(0, 0%, 60%), hsl(0, 0%, 40%));
+      --c5: hsl(0, 0%, 50%);
+
+      /* Theme-aware highlight palette (SubMiner/Migaku-inspired). */
+      --known: light-dark(#4c8a4c, #a6da95);
+      --nplus: light-dark(#7b4fb0, #c6a0f6);
+      --nplus-soft: color-mix(in srgb, var(--nplus) 45%, transparent);
+      --sel-bg: color-mix(in srgb, var(--nplus) 16%, transparent);
+
+      /* Frequency bands for unknown words: common = warm/vivid, rare = faded. */
+      --freq1: light-dark(#c2410c, #f5a97f);     /* very common (rank ≤ 1500) */
+      --freq2: light-dark(#a16207, #eed49f);     /* common (≤ 5000) */
+      --freq3: light-dark(#3a7ca5, #8aadf4);     /* mid (≤ 15000) */
+      --freq4: light-dark(#6b7280, #939ab7);     /* uncommon (≤ topX) */
+      --freq-rare: light-dark(#a1a6b0, #5b616e); /* rare / not in list */
+
+      font-family: "Inter", serif;
+      font-optical-sizing: auto;
+      font-style: normal;
+    }
+
+    .notransition { transition: none !important; }
+
+    ::-webkit-scrollbar { width: 0.3rem; height: 0.3rem; }
+    ::-webkit-scrollbar-thumb { background: var(--c2); border-radius: 4rem; }
+    ::-webkit-scrollbar-track { background: var(--c0); border-radius: 4rem; }
+
+    body {
+      background: var(--cb);
+      color: var(--cf);
+      margin: 0;
+      height: 100vh;
+      overflow-y: hidden;
+      display: flex;
+      flex-direction: column;
+    }
+
+    .header-container {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      padding-block: 0.5rem;
+      padding-inline: 2rem;
+    }
+
+    .lines-container { overflow-y: auto; scrollbar-gutter: stable; height: 100%; }
+
+    .lines {
+      display: flex;
+      flex-direction: column;
+      max-width: 80rem;
+      justify-self: center;
+      margin: auto;
+      padding-inline: 3rem;
+      margin-bottom: 1.5rem;
+      gap: 1.25rem;
+    }
+
+    .lines>div>p {
+      margin-top: 0;
+      margin-bottom: 0.35rem;
+      font-size: 0.8rem;
+      color: var(--c5);
+      width: 100%;
+    }
+
+    /* "Focus N+1" collapse: max-height is measured from the line's actual
+       rendered height in JS (updateLineVisibility), not a guessed cap — an
+       oversized fixed cap would make the animation look frozen, then snap
+       shut near the end, since the browser interpolates the declared px
+       values, not the visible content. */
+    .sub-line {
+      overflow: hidden;
+      transition: max-height 280ms ease, opacity 220ms ease;
+    }
+    .sub-line.filter-hide { opacity: 0; pointer-events: none; }
+
+    .line-box {
+      font-family: 'Shippori Mincho';
+      max-width: 100%;
+      font-size: 1.25rem;
+      border: 2px solid var(--c2);
+      border-left: 4px solid var(--c2);
+      border-radius: 0.75rem;
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      cursor: pointer;
+      user-select: none;
+    }
+
+    .line-box>span { padding: 0.5rem; }
+
+    /* Line-level category cues. */
+    .cat-nplusone>.line-box { border-left-color: var(--nplus); }
+    .cat-known>.line-box { opacity: 0.4; }
+    .cat-empty>.line-box { opacity: 0.5; }
+    .sub-line:hover>.line-box { border-color: var(--c4); }
+    .sub-line.selected>.line-box {
+      background: var(--sel-bg);
+      border-color: var(--nplus);
+      border-left-color: var(--nplus);
+    }
+
+    /* Word-level highlighting. */
+    .known-word { color: var(--known); opacity: 0.62; }
+    .cat-nplusone .unknown-word {
+      color: var(--nplus);
+      text-decoration: underline;
+      text-decoration-color: var(--nplus-soft);
+      text-underline-offset: 0.18em;
+      font-weight: 600;
+    }
+
+    /* Frequency-band tint of unknown words. Listed after the N+1 rule so the
+       band color wins for N+1 targets (which keep the underline/weight cue). */
+    .unknown-word.freq-1 { color: var(--freq1); }
+    .unknown-word.freq-2 { color: var(--freq2); }
+    .unknown-word.freq-3 { color: var(--freq3); }
+    .unknown-word.freq-4 { color: var(--freq4); }
+    .unknown-word.freq-rare { color: var(--freq-rare); }
+
+    /* The word that will be mined for a selected line. */
+    .mine-target {
+      outline: 2px solid var(--nplus);
+      outline-offset: 1px;
+      border-radius: 3px;
+      background: color-mix(in srgb, var(--nplus) 14%, transparent);
+    }
+
+    /* Lines merged for Yomitan mining: the anchor shows the whole sentence, the
+       other members are hidden (overriding the playback show/hide). */
+    .merged-away { display: none !important; }
+    .merged-anchor > .line-box { border-left: 4px dashed var(--nplus); }
+
+    #freq-status { color: var(--c5); font-size: 0.78rem; white-space: nowrap; }
+
+    /* Merge button (secondary/outlined; override the square icon-button rule). */
+    #merge-btn {
+      width: auto;
+      height: auto;
+      aspect-ratio: auto;
+      font-family: 'Inter';
+      font-size: 0.85rem;
+      font-weight: 600;
+      color: var(--nplus);
+      background: transparent;
+      border: 1.5px solid var(--nplus);
+      border-radius: 0.6rem;
+      padding: 0.3rem 0.7rem;
+      white-space: nowrap;
+    }
+    #merge-btn:hover:not(:disabled) { background: var(--sel-bg); }
+    #merge-btn:disabled { opacity: 0.4; cursor: default; }
+
+    /* Focus-N+1 toggle (same outlined pill; filled when active). */
+    #nplus-filter-btn {
+      width: auto;
+      height: auto;
+      aspect-ratio: auto;
+      font-family: 'Inter';
+      font-size: 0.85rem;
+      font-weight: 600;
+      color: var(--nplus);
+      background: transparent;
+      border: 1.5px solid var(--nplus);
+      border-radius: 0.6rem;
+      padding: 0.3rem 0.7rem;
+      white-space: nowrap;
+    }
+    #nplus-filter-btn:hover { background: var(--sel-bg); }
+    #nplus-filter-btn.active { color: var(--cb); background: var(--nplus); }
+
+    .blank { height: 50%; }
+
+    .shill {
+      position: absolute;
+      bottom: 0rem;
+      background-color: var(--cb);
+      width: 100%;
+      box-sizing: border-box;
+      padding-left: 1rem;
+      padding-bottom: 0.25rem;
+      font-size: x-small;
+      font-weight: 500;
+      color: var(--c4);
+      font-family: 'Inter';
+      right: 0.5rem;
+    }
+
+    .title { font-size: x-large; }
+
+    .header-options>button {
+      width: 2.25rem;
+      height: 2.25rem;
+      aspect-ratio: 1;
+      border: 0;
+      border-radius: 0.75rem;
+      padding: 0.45rem;
+      background-color: transparent;
+      display: flex;
+      align-content: center;
+    }
+    .header-options>button:hover { background-color: var(--c1); }
+
+    #known-words-status { color: var(--c5); font-size: 0.78rem; white-space: nowrap; }
+    #known-words-status.error { color: var(--color-red-500); }
+
+    #nplus-count {
+      color: var(--nplus);
+      font-size: 0.82rem;
+      font-weight: 600;
+      white-space: nowrap;
+      cursor: pointer;
+      padding: 0.15rem 0.4rem;
+      border-radius: 0.5rem;
+    }
+    #nplus-count:hover { background: var(--sel-bg); }
+
+    #mine-btn {
+      /* Override the square icon-button rule above so the label isn't clipped. */
+      width: auto;
+      height: auto;
+      aspect-ratio: auto;
+      font-family: 'Inter';
+      font-size: 0.85rem;
+      font-weight: 600;
+      color: var(--cb);
+      background: var(--nplus);
+      border: 0;
+      border-radius: 0.6rem;
+      padding: 0.4rem 0.8rem;
+      white-space: nowrap;
+    }
+    #mine-btn:hover:not(:disabled) { filter: brightness(1.08); }
+    #mine-btn:disabled { opacity: 0.4; cursor: default; }
+
+    .known-refresh { font-size: 1.35rem; justify-content: center; align-items: center; }
+
+    .active-indicator {
+      background-color: var(--color-red-500);
+      aspect-ratio: 1;
+      width: auto;
+      height: 60%;
+      border-radius: 0.5rem;
+      margin-left: 1rem;
+    }
+
+    button:hover { cursor: pointer; }
+
+    #settings {
+      position: absolute;
+      width: 50%;
+      height: fit-content;
+      max-width: 48rem;
+      inset: 0;
+      margin: auto;
+      background-color: var(--cb);
+      border-radius: 1.5rem;
+      border: solid 2px var(--c1);
+      z-index: 10;
+      padding: 1.5rem;
+      max-height: 90vh;
+      overflow-y: auto;
+    }
+    #settings>div { display: flex; flex-direction: column; width: 100%; height: 100%; gap: 1.25rem; }
+    #settings>div>div { display: flex; flex-direction: column; gap: 0.4rem; }
+    #settings>div>div>span { font-weight: 500; font-size: medium; }
+    #settings>div>div>small { color: var(--c5); font-size: 0.75rem; }
+    #settings>div>div>input, #settings>div>div>textarea {
+      font-size: large;
+      background-color: var(--c1);
+      border: 0;
+      padding-inline: 1rem;
+      padding-block: 0.5rem;
+      border-radius: 0.5rem;
+      font-family: monospace;
+      color: var(--cf);
+    }
+    #settings>div>div>textarea { font-size: medium; min-height: 3.5rem; resize: vertical; }
+    #settings>div>div>input:focus, #settings>div>div>textarea:focus { outline: none; }
+    #settings>div>button {
+      border: 0;
+      border-radius: 0.75rem;
+      padding: 0.5rem;
+      background-color: transparent;
+      font-size: large;
+      font-weight: 500;
+      text-align: center;
+      margin-top: 1rem;
+    }
+    #settings>div>button:hover { background-color: var(--c1); }
+  </style>
+</head>
+
+<body onload="onLoad()">
+  <div class="header-container">
+    <span class="title">Autocards</span>
+    <div class="header-options" style="display: flex; align-items: center; gap: 0.85rem; height: 100%;">
+      <span id="known-words-status">Known: loading…</span>
+      <span id="freq-status" style="display:none"></span>
+      <span id="nplus-count" onclick="selectAllNPlusOne()" title="Lines with exactly one unknown word (ideal to mine). Click to select all.">N+1: —</span>
+      <button id="nplus-filter-btn" onclick="toggleNPlusFilter()" title="Focus mode: show only N+1 lines, fading/collapsing the rest out of view">Focus N+1</button>
+      <button id="mine-btn" onclick="mineSelected(false)" disabled title="Create one Anki card per selected line">Mine (0)</button>
+      <button id="merge-btn" onclick="mergeLines()" disabled title="Combine selected lines into one line, then hover-mine it with Yomitan (for a sentence split across subtitle cues)">Merge (0)</button>
+      <button class="known-refresh" onclick="rebuildKnownWords()" title="Rebuild known-word cache from Anki">↻</button>
+      <button onclick="toggleTheme()" title="Toggle theme">
+        <svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none"
+          stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+          <path d="M12 8a2.83 2.83 0 0 0 4 4 4 4 0 1 1-4-4" />
+          <path d="M12 2v2" /><path d="M12 20v2" /><path d="m4.9 4.9 1.4 1.4" /><path d="m17.7 17.7 1.4 1.4" />
+          <path d="M2 12h2" /><path d="M20 12h2" /><path d="m6.3 17.7-1.4 1.4" /><path d="m19.1 4.9-1.4 1.4" />
+        </svg>
+      </button>
+      <button popovertarget="settings" style="color: light-dark(black, white)" title="Settings">
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"
+          stroke-linecap="round" stroke-linejoin="round">
+          <path d="M12.22 2h-.44a2 2 0 0 0-2 2v.18a2 2 0 0 1-1 1.73l-.43.25a2 2 0 0 1-2 0l-.15-.08a2 2 0 0 0-2.73.73l-.22.38a2 2 0 0 0 .73 2.73l.15.1a2 2 0 0 1 1 1.72v.51a2 2 0 0 1-1 1.74l-.15.09a2 2 0 0 0-.73 2.73l.22.38a2 2 0 0 0 2.73.73l.15-.08a2 2 0 0 1 2 0l.43.25a2 2 0 0 1 1 1.73V20a2 2 0 0 0 2 2h.44a2 2 0 0 0 2-2v-.18a2 2 0 0 1 1-1.73l.43-.25a2 2 0 0 1 2 0l.15.08a2 2 0 0 0 2.73-.73l.22-.39a2 2 0 0 0-.73-2.73l-.15-.08a2 2 0 0 1-1-1.74v-.5a2 2 0 0 1 1-1.74l.15-.09a2 2 0 0 0 .73-2.73l-.22-.38a2 2 0 0 0-2.73-.73l-.15.08a2 2 0 0 1-2 0l-.43-.25a2 2 0 0 1-1-1.73V4a2 2 0 0 0-2-2z" />
+          <circle cx="12" cy="12" r="3" />
+        </svg>
+      </button>
+      <div class="active-indicator"></div>
+    </div>
+  </div>
+  <div class="lines-container">
+    <div class="lines"></div>
+    <div class="blank"></div>
+    <div class="shill">Made with &hearts; by かにふぁん · known-word &amp; batch-mining patch</div>
+  </div>
+  <div id="settings" popover>
+    <div>
+      <div><span>Mining Deck</span><input id="field-deck" autocomplete="off"></div>
+      <div><span>Sentence Field</span><input id="field-sentence" autocomplete="off"></div>
+      <div><span>Expression Field</span><input id="field-expression" autocomplete="off"></div>
+      <div><span>Picture Field</span><input id="field-picture" autocomplete="off"></div>
+      <div><span>Sentence Audio Field</span><input id="field-audio" autocomplete="off"></div>
+      <div><span>Previous Sentences</span><input id="field-prev-lines" type="number" min="0" autocomplete="off"></div>
+      <div><span>Next Sentences</span><input id="field-next-lines" type="number" min="0" autocomplete="off"></div>
+      <div>
+        <span>Known-word Decks</span>
+        <textarea id="field-known-decks" autocomplete="off" placeholder="Kaishi 1.5k: Word&#10;Core 2k/6k: vocab-kanji"></textarea>
+        <small>One per line: <code>Deck Name: Field, Field</code>. Your mining deck is always included. Rebuild (↻) after editing.</small>
+      </div>
+      <div>
+        <span>Note Type <small>(optional — auto-detected from your mining deck)</small></span>
+        <input id="field-model" autocomplete="off" placeholder="(auto)">
+      </div>
+      <div>
+        <span>Frequency Dictionary <small>(optional — a Yomitan freq dict: .zip, a folder, or leave empty)</small></span>
+        <input id="field-freq-path" autocomplete="off" placeholder="C:\path\to\JPDB_v2.2_Frequency.zip">
+        <small>Tints unknown words by how common they are, so frequent (worth-mining) words stand out. Rebuild happens automatically on Update.</small>
+      </div>
+      <button popovertarget="settings" onclick="updateOptions()">Update</button>
+    </div>
+  </div>
+</body>

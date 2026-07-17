@@ -1,0 +1,36 @@
+# The repository is a complete portable distribution. Keep large executables,
+# runtimes, compressed tokenizer data, and helper binaries in Git LFS so the
+# normal Git object history stays usable and GitHub accepts files over 100 MB.
+*.exe filter=lfs diff=lfs merge=lfs -text
+*.dll filter=lfs diff=lfs merge=lfs -text
+*.pyd filter=lfs diff=lfs merge=lfs -text
+*.com filter=lfs diff=lfs merge=lfs -text
+*.zip filter=lfs diff=lfs merge=lfs -text
+*.gz filter=lfs diff=lfs merge=lfs -text
+*.ttf filter=lfs diff=lfs merge=lfs -text
+*.otf filter=lfs diff=lfs merge=lfs -text
+*.ico filter=lfs diff=lfs merge=lfs -text
+
+# uosc ships platform helper binaries without filename extensions.
+/portable_config/scripts/uosc/bin/* filter=lfs diff=lfs merge=lfs -text
+
+# Smaller binary assets stay in normal Git but must never receive line-ending
+# conversion or text diffs.
+*.pdf binary
+*.png binary
+*.jpg binary
+*.jpeg binary
+*.webp binary
+*.cat binary
+*.dat binary
+
+# Keep source and documentation line endings stable across Windows clones.
+*.py text eol=lf
+*.js text eol=lf
+*.html text eol=lf
+*.css text eol=lf
+*.lua text eol=lf
+*.md text eol=lf
+*.json text eol=lf
+*.yml text eol=lf
+*.yaml text eol=lf

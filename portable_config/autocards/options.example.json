@@ -1,0 +1,12 @@
+{
+  "deck": "\"Mining\"",
+  "sentence": "Sentence",
+  "expression": "Expression",
+  "picture": "Picture",
+  "audio": "SentenceAudio",
+  "prev_lines": 0,
+  "next_lines": 0,
+  "known_decks": "",
+  "model": "",
+  "freq_path": ""
+}

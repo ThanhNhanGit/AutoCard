@@ -1,0 +1,7 @@
+<settings>
+  <arch>x86_64</arch>
+  <autodelete>true</autodelete>
+  <getffmpeg>false</getffmpeg>
+  <getytdl>ytdlp</getytdl>
+  <ytdlpchannel>stable</ytdlpchannel>
+</settings>
