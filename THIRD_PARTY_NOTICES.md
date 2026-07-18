@@ -1,27 +1,53 @@
 # Third-party notices
 
-AutoCard is distributed as a portable bundle. The top-level GPL license applies to project-authored Autocards code and modifications; it does not replace the licenses of the independent programs, libraries, scripts, fonts, or data listed below.
+AutoCard is a portable aggregate containing project-authored code and independent third-party
+programs, libraries, scripts, fonts, and data. The top-level GPL-3.0-or-later license covers the
+original Autocards code and AutoCard modifications; it does not relicense independent components.
 
-The corresponding full license texts and required notices are included in the repository at the paths shown.
+The complete source/provenance record for distributed binaries is in
+[CORRESPONDING_SOURCE.md](CORRESPONDING_SOURCE.md).
 
-| Component | Bundled location | License / notice | Upstream |
+## Bundled components
+
+| Component | Bundled location | Version / provenance | License and notice |
 | --- | --- | --- | --- |
-| Original Autocards code by かにふぁん | `portable_config/autocards/`, `portable_config/scripts/autocards.lua` | GPL-3.0-or-later — `LICENSE` and `portable_config/autocards/LICENSE` | [One-Click Anime Cards](https://learnjapanese.moe/autocards/) |
-| mpv | `mpv.exe`, `mpv.com` | License text supplied with this build — `mpv.LICENSE` | [mpv](https://mpv.io/) |
-| FFmpeg | `ffmpeg.exe` | License text supplied with this build — `ffmpeg.LICENSE` | [FFmpeg](https://ffmpeg.org/) |
-| yt-dlp | `yt-dlp.exe` | The Unlicense — `yt-dlp.LICENSE`; official release executables may include separately licensed bundled components described by yt-dlp upstream | [yt-dlp](https://github.com/yt-dlp/yt-dlp) |
-| yt-dlp HiAnime extractor plugin | `yt-dlp-plugins/yt-dlp-hianime-master/` | The Unlicense — `yt-dlp-plugins/yt-dlp-hianime-master/LICENSE` | [yt-dlp-hianime](https://github.com/pratikpatel8982/yt-dlp-hianime) |
-| Python embedded distribution | `portable_config/autocards/python/` | Python Software Foundation License and bundled notices — `portable_config/autocards/python/LICENSE.txt` | [Python](https://www.python.org/) |
-| curl | `portable_config/autocards/curl.exe` | curl license — `portable_config/autocards/CURL_LICENSE.txt` | [curl](https://curl.se/) |
-| kuromoji.js | `portable_config/autocards/vendor/kuromoji.js`, tokenizer dictionary data | Apache License 2.0 — `portable_config/autocards/vendor/LICENSE-2.0.txt`; IPADIC attribution — `portable_config/autocards/vendor/NOTICE.md` | [kuromoji.js](https://github.com/takuyaa/kuromoji.js) |
-| mecab-ipadic dictionary data | `portable_config/autocards/vendor/dict/` | Attribution and redistribution terms in `portable_config/autocards/vendor/NOTICE.md` | [mecab-ipadic](https://sourceforge.net/projects/mecab/files/mecab-ipadic/) |
-| uosc and its bundled icon/texture fonts and helper binaries | `portable_config/scripts/uosc/`, `portable_config/fonts/uosc_*` | LGPL-2.1 — `portable_config/scripts/uosc/LICENSE.LGPL` | [uosc](https://github.com/tomasklaen/uosc) |
-| thumbfast | `portable_config/scripts/thumbfast.lua` | MPL-2.0 — `portable_config/scripts/thumbfast.LICENSE` | [thumbfast](https://github.com/po5/thumbfast) |
+| Original Autocards by かにふぁん | `portable_config/autocards/`, `portable_config/scripts/autocards.lua` | [One-Click Anime Cards](https://learnjapanese.moe/autocards/) | GPL-3.0-or-later — `LICENSE` and `portable_config/autocards/LICENSE` |
+| mpv and statically linked dependencies | `mpv.exe`, `mpv.com` | mpv `v0.41.0-60-g85bf9f4ff`; source/build record in `CORRESPONDING_SOURCE.md` | mpv source is GPL-2.0-or-later; this distributed combined build contains GPLv3 components and is provided under GPL-3.0-or-later — `mpv.LICENSE` |
+| FFmpeg and statically linked dependencies | `ffmpeg.exe` | `N-121764-g88b676105`; configured with `--enable-gpl --enable-version3` | **GPL-3.0-or-later** — `ffmpeg.LICENSE` |
+| yt-dlp | `yt-dlp.exe` | `2025.12.08` | The Unlicense — `yt-dlp.LICENSE` |
+| yt-dlp HiAnime extractor | `yt-dlp-plugins/yt-dlp-hianime-master/` | `3.0.0` | The Unlicense — bundled `LICENSE` |
+| Python embedded distribution | `portable_config/autocards/python/` | `3.13.2` | Python Software Foundation License and bundled notices — `portable_config/autocards/python/LICENSE.txt` |
+| curl | `portable_config/autocards/curl.exe` | `8.12.1` | curl license — `portable_config/autocards/CURL_LICENSE.txt` |
+| kuromoji.js | `portable_config/autocards/vendor/kuromoji.js` | Upstream: [takuyaa/kuromoji.js](https://github.com/takuyaa/kuromoji.js) | Apache-2.0 — `portable_config/autocards/vendor/LICENSE-2.0.txt` |
+| mecab-ipadic dictionary data | `portable_config/autocards/vendor/dict/` | Distributed with kuromoji.js | Attribution and redistribution terms — `portable_config/autocards/vendor/NOTICE.md` |
+| uosc, fonts, and helper binaries | `portable_config/scripts/uosc/`, `portable_config/fonts/uosc_*` | `5.8.0` | LGPL-2.1 — `portable_config/scripts/uosc/LICENSE.LGPL` |
+| thumbfast | `portable_config/scripts/thumbfast.lua` | Upstream: [po5/thumbfast](https://github.com/po5/thumbfast) | MPL-2.0 — `portable_config/scripts/thumbfast.LICENSE` |
+| mpv installer scripts and icon | `installer/mpv-install.bat`, `installer/mpv-uninstall.bat`, `installer/mpv-icon.ico` | Derived from [rossy/mpv-install](https://github.com/rossy/mpv-install), packaged by [shinchiro/mpv-packaging](https://github.com/shinchiro/mpv-packaging) | ISC — `installer/LICENSE` |
+| mpv manual | `doc/manual.pdf` | Generated from mpv documentation; source commit is recorded in `CORRESPONDING_SOURCE.md` | GPL-2.0-or-later; distributed combined materials use `mpv.LICENSE` |
 
-## Source and build offers
+## FFmpeg correction
 
-This repository contains the source files for the project-authored Python, HTML/JavaScript, and Lua integration code. For independently built third-party executables, use the upstream links above to obtain their corresponding source and build instructions for the exact version you redistribute. When replacing a bundled executable, update its adjacent license text and this notice if the applicable terms change.
+Earlier AutoCard revisions placed the LGPL-2.1 text in `ffmpeg.LICENSE`. Inspection of the bundled
+binary shows both `--enable-gpl` and `--enable-version3`, including GPL libraries such as x264 and
+x265. The resulting FFmpeg binary is GPL-3.0-or-later, so the adjacent license has been corrected.
+
+## Source availability
+
+AutoCard publishes immutable source commits, build information, and hashes in
+`CORRESPONDING_SOURCE.md`. Anyone redistributing or replacing a binary must update that record and
+preserve equivalent access to the exact corresponding source for as long as the binary is offered.
+
+Project-authored Python, HTML/JavaScript, and Lua source is included in this repository. Source for
+bundled uosc, thumbfast, the extractor plugin, and the project modifications is also included.
+
+## Removed unlicensed extras
+
+The current distribution omits the former `installer/updater.ps1`, root `updater.bat`, and
+`doc/mpbindings.png`. Their public upstream locations did not contain a clear redistribution
+license. They are not required to run AutoCard. Historical repository revisions containing those
+files should not be redistributed without permission from their respective authors.
 
 ## No endorsement
 
-Third-party project names and trademarks identify compatibility or redistributed components only. Their inclusion does not imply endorsement of AutoCard.
+Third-party names identify compatibility, provenance, or bundled components only. Their inclusion
+does not imply sponsorship or endorsement. See [TRADEMARKS.md](TRADEMARKS.md).

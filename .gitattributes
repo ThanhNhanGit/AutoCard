@@ -34,3 +34,9 @@
 *.json text eol=lf
 *.yml text eol=lf
 *.yaml text eol=lf
+
+# License and notice files must remain readable and byte-stable on every platform.
+.gitattributes text eol=lf
+LICENSE text eol=lf
+*.LICENSE text eol=lf
+*.sha256 text eol=lf

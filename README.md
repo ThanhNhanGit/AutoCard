@@ -1,14 +1,19 @@
 # AutoCard — Japanese Anki Sentence Mining with mpv + Yomitan
 
+[![License: GPL-3.0-or-later](https://img.shields.io/badge/License-GPL--3.0--or--later-blue.svg)](LICENSE)
+[![Third-party notices](https://img.shields.io/badge/third--party-notices-informational.svg)](THIRD_PARTY_NOTICES.md)
+
 **AutoCard is an open-source, portable Windows toolkit for Japanese sentence mining with Anki, mpv, Yomitan, and Japanese subtitles.** It turns anime and video subtitle lines into Anki flashcards with sentence audio, screenshots, known-word highlighting, N+1 detection, frequency coloring, batch selection, and multi-line mining.
 
 Use your normal Yomitan → AnkiConnect workflow, keep AnkiConnect on `http://127.0.0.1:8765`, and let AutoCard enrich mined notes with the current subtitle sentence and media. Everything runs locally—no proxy, cloud account, subscription, or application-wide endpoint change.
 
 **Use cases:** anime sentence mining, Japanese subtitle mining, Anki flashcard creation, Yomitan mining, mpv immersion, N+1 sentence discovery, known-word tracking, and post-episode batch mining.
 
-[Features](#what-this-build-adds) · [Quick start](#quick-start) · [Configuration](#configuration) · [Mining workflows](#mining-workflows) · [FAQ](#frequently-asked-questions) · [Troubleshooting](#troubleshooting)
+[Features](#what-this-build-adds) · [Quick start](#quick-start) · [Configuration](#configuration) · [Mining workflows](#mining-workflows) · [FAQ](#frequently-asked-questions) · [Licensing](#license-credits-and-responsible-use)
 
-This enhanced distribution is based on Autocards by かにふぁん and the [One-Click Anime Cards guide](https://learnjapanese.moe/autocards/). Its cache-first highlighting design was inspired by [SubMiner](https://github.com/ksyasuda/SubMiner). It offers some Migaku/SubMiner-style mining conveniences in a small local Autocards workflow, but is not affiliated with Migaku, SubMiner, Yomitan, Anki, mpv, or FFmpeg.
+This enhanced distribution is based on Autocards by かにふぁん and the [One-Click Anime Cards guide](https://learnjapanese.moe/autocards/). Its cache-first highlighting design was inspired by [SubMiner](https://github.com/ksyasuda/SubMiner). It offers some Migaku/SubMiner-style mining conveniences in a small local Autocards workflow.
+
+AutoCard is an independent community project. It is not affiliated with, sponsored by, or endorsed by Anki, AnkiConnect, Yomitan, mpv, FFmpeg, Migaku, SubMiner, HiAnime, or their maintainers. Product names identify compatibility only; see [TRADEMARKS.md](TRADEMARKS.md).
 
 ## What this build adds
 
@@ -64,6 +69,8 @@ git lfs pull
 ```
 
 Do not use a clone that contains small text-pointer files in place of `mpv.exe` or `ffmpeg.exe`; run `git lfs pull` first.
+
+Before redistributing the portable bundle, read [CORRESPONDING_SOURCE.md](CORRESPONDING_SOURCE.md). It records exact binary versions, SHA-256 hashes, source commits, build configuration, and source-availability obligations.
 
 ### Start Japanese sentence mining
 
@@ -255,11 +262,15 @@ Do not test development changes against a valuable live collection when a simula
 - Deleting or editing old Anki notes requires a known-word cache rebuild.
 - Batch mining intentionally does not invent dictionary definitions.
 
-## License and credits
+## License, credits, and responsible use
+
+AutoCard does not include anime, subtitles, card collections, or other copyrighted media. Use it only with media and subtitle files that you own or are authorized to process. Do not use AutoCard or an optional extractor to bypass access controls, DRM, paywalls, or applicable platform restrictions. You are responsible for complying with copyright law and service terms in your jurisdiction.
+
+The bundled HiAnime extractor is an optional independent third-party component. Its presence is not an endorsement of any site or permission to download copyrighted content. Remove `yt-dlp-plugins/yt-dlp-hianime-master/` if you do not need it.
 
 Project-authored Autocards code and modifications are distributed under **GPL-3.0-or-later**. See [LICENSE](LICENSE).
 
-The portable package also redistributes independent third-party programs and data under their own licenses. Those components are not relicensed by the project-wide GPL notice. See [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md) and the license files stored beside each component.
+The portable package also redistributes independent third-party programs and data under their own licenses. Those components are not relicensed by the project-wide GPL notice. See [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md), [CORRESPONDING_SOURCE.md](CORRESPONDING_SOURCE.md), [TRADEMARKS.md](TRADEMARKS.md), and the license files stored beside each component.
 
 Key credits:
 
