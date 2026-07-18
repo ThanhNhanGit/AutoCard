@@ -1,8 +1,14 @@
-# AutoCard
+# AutoCard — Japanese Anki Sentence Mining with mpv + Yomitan
 
-An enhanced, portable Windows build of **Autocards** for Japanese sentence mining. It keeps the original mpv-to-Anki workflow while adding local known-word highlighting, N+1 discovery, frequency coloring, batch selection, and multi-subtitle merging.
+**AutoCard is an open-source, portable Windows toolkit for Japanese sentence mining with Anki, mpv, Yomitan, and Japanese subtitles.** It turns anime and video subtitle lines into Anki flashcards with sentence audio, screenshots, known-word highlighting, N+1 detection, frequency coloring, batch selection, and multi-line mining.
 
-This repository is based on Autocards by かにふぁん and the [One-Click Anime Cards guide](https://learnjapanese.moe/autocards/). The cache-first highlighting design was inspired by [SubMiner](https://github.com/ksyasuda/SubMiner). This project is not affiliated with Migaku, SubMiner, Yomitan, or Anki.
+Use your normal Yomitan → AnkiConnect workflow, keep AnkiConnect on `http://127.0.0.1:8765`, and let AutoCard enrich mined notes with the current subtitle sentence and media. Everything runs locally—no proxy, cloud account, subscription, or application-wide endpoint change.
+
+**Use cases:** anime sentence mining, Japanese subtitle mining, Anki flashcard creation, Yomitan mining, mpv immersion, N+1 sentence discovery, known-word tracking, and post-episode batch mining.
+
+[Features](#what-this-build-adds) · [Quick start](#quick-start) · [Configuration](#configuration) · [Mining workflows](#mining-workflows) · [FAQ](#frequently-asked-questions) · [Troubleshooting](#troubleshooting)
+
+This enhanced distribution is based on Autocards by かにふぁん and the [One-Click Anime Cards guide](https://learnjapanese.moe/autocards/). Its cache-first highlighting design was inspired by [SubMiner](https://github.com/ksyasuda/SubMiner). It offers some Migaku/SubMiner-style mining conveniences in a small local Autocards workflow, but is not affiliated with Migaku, SubMiner, Yomitan, Anki, mpv, or FFmpeg.
 
 ## What this build adds
 
@@ -20,6 +26,20 @@ This repository is based on Autocards by かにふぁん and the [One-Click Anim
 
 Everything runs locally. The browser communicates with AutoCard on port `6969`; AutoCard communicates directly with AnkiConnect on port `8765`.
 
+## Why AutoCard?
+
+AutoCard is designed for learners who watch an episode first and mine useful Japanese sentences afterward without manually scrubbing through every subtitle cue.
+
+| Mining problem | AutoCard workflow |
+| --- | --- |
+| Every subtitle line looks identical | Known words are muted; unknown and N+1 candidates remain visually prominent. |
+| Finding the next useful sentence takes too much scrolling | **Focus N+1** collapses non-N+1 lines with a smooth fade. |
+| A spoken sentence is split across subtitle cues | Select the cues, press **Merge**, then mine the continuous sentence with Yomitan. |
+| Merged audio contains long silent gaps | Selected cue segments are concatenated while the gaps are removed. |
+| Batch mining chooses unwanted words or lines | You select the exact lines and target expressions before creating notes. |
+| Full-deck Anki scans would interrupt playback | A persistent local cache handles highlighting and updates newly mined words immediately. |
+| Other mining tools already use AnkiConnect | AutoCard leaves the standard `127.0.0.1:8765` endpoint untouched. |
+
 ## Requirements
 
 - Windows 10 or 11
@@ -30,16 +50,29 @@ Everything runs locally. The browser communicates with AutoCard on port `6969`; 
 
 The portable bundle already includes mpv, FFmpeg, yt-dlp, Python, curl, and the browser tokenizer files used by AutoCard.
 
-## Installation
+## Quick start
 
-### Normal use
+### Get the complete portable bundle
 
-1. Download and extract a complete release of this repository.
-2. Install AnkiConnect and keep its standard endpoint at `http://127.0.0.1:8765`.
-3. Open Anki.
-4. Run `mpv.exe` and open a video containing Japanese subtitles.
-5. AutoCard starts with mpv and opens `http://127.0.0.1:6969` in your browser.
-6. Open the settings button in the AutoCard page and map the fields to your Anki note type.
+This repository uses Git LFS for mpv, FFmpeg, Python, tokenizer dictionaries, and other bundled binaries. Install [Git LFS](https://git-lfs.com/), then clone the repository:
+
+```powershell
+git lfs install
+git clone https://github.com/ThanhNhanGit/AutoCard.git
+cd AutoCard
+git lfs pull
+```
+
+Do not use a clone that contains small text-pointer files in place of `mpv.exe` or `ffmpeg.exe`; run `git lfs pull` first.
+
+### Start Japanese sentence mining
+
+1. Install AnkiConnect and keep its standard endpoint at `http://127.0.0.1:8765`.
+2. Open Anki.
+3. Run `mpv.exe` and open a video containing Japanese subtitles.
+4. AutoCard starts with mpv and opens `http://127.0.0.1:6969` in your browser.
+5. Open the settings button in the AutoCard page and map the fields to your Anki note type.
+6. Hover a word with Yomitan and create a note normally; AutoCard adds the subtitle sentence, cropped audio, and screenshot.
 
 Keep the directory structure intact. `mpv.exe`, `ffmpeg.exe`, and `portable_config` must remain siblings:
 
@@ -55,19 +88,6 @@ Autocards/
         ├── server.py
         └── index.html
 ```
-
-### Clone from Git
-
-The repository contains large portable binaries through Git LFS:
-
-```powershell
-git lfs install
-git clone https://github.com/ThanhNhanGit/AutoCard.git
-cd AutoCard
-git lfs pull
-```
-
-If `mpv.exe` is only a small text pointer after cloning, Git LFS was not installed or `git lfs pull` has not completed.
 
 ## Configuration
 
@@ -161,6 +181,51 @@ Fully close mpv, reopen it, and hard-refresh the browser with `Ctrl+Shift+R`. Ol
 ### The page still runs old code
 
 The Python server is launched once per mpv session. Fully close every mpv window, reopen mpv, and use `Ctrl+Shift+R` in the browser.
+
+## Frequently asked questions
+
+### What is Japanese sentence mining?
+
+Sentence mining is the practice of saving useful words in sentences encountered during immersion—such as anime, dramas, movies, or YouTube—to personal Anki flashcards. AutoCard automates the subtitle sentence, audio, and screenshot portions of that workflow.
+
+### Does AutoCard work with Yomitan and AnkiConnect?
+
+Yes. Yomitan continues sending notes directly to AnkiConnect at `http://127.0.0.1:8765`. AutoCard detects the new note and enriches it; it does not replace or proxy AnkiConnect.
+
+### Is AutoCard an open-source Migaku or SubMiner replacement?
+
+AutoCard covers a narrower workflow: local mpv subtitle review, known-word highlighting, N+1 filtering, frequency bands, selected batch mining, and multi-line subtitle merging. Migaku and SubMiner have different architectures and broader feature sets. AutoCard is independent and is not a drop-in replacement for either project.
+
+### How does N+1 detection work?
+
+The browser tokenizes Japanese subtitle text with kuromoji/IPADIC, converts tokens to dictionary forms, and compares them with the local known-word cache. A line is marked N+1 when exactly one eligible unknown expression remains.
+
+### Can I show only N+1 subtitle lines?
+
+Yes. Press **Focus N+1** to smoothly fade and collapse the other lines. Press it again to restore the full subtitle history.
+
+### Can I batch mine an anime episode after watching it?
+
+Yes. Select only the lines you want, confirm or change each target expression, and press **Mine**. AutoCard creates one note per selected line with cropped media. Batch-created notes do not include Yomitan dictionary definitions; use normal Yomitan mining when selected definitions are required.
+
+### Can AutoCard merge two subtitle lines into one Anki sentence?
+
+Yes. Select two or more cues and press **Merge**, then hover-mine the merged text with Yomitan. AutoCard stores the full combined sentence and concatenates the selected audio segments without the silence between cues.
+
+### Does AutoCard upload subtitles or Anki data?
+
+No. Subtitle processing, tokenization, cache storage, media capture, and AnkiConnect communication happen locally. AutoCard itself has no telemetry or cloud service.
+
+### Which frequency dictionaries are supported?
+
+Use a Yomitan-format frequency dictionary containing `term_meta_bank_*.json` entries. AutoCard accepts the dictionary ZIP, an extracted folder, or a compatible JSON source.
+
+## Get help and contribute
+
+- Read [CONTRIBUTING.md](CONTRIBUTING.md) before proposing a code change.
+- Use a [bug report](https://github.com/ThanhNhanGit/AutoCard/issues/new?template=bug_report.yml) for reproducible failures.
+- Use a [feature request](https://github.com/ThanhNhanGit/AutoCard/issues/new?template=feature_request.yml) for mining-workflow improvements.
+- Include the output of `http://127.0.0.1:6969/subtitle-debug` when reporting subtitle-loading problems.
 
 ## Development
 

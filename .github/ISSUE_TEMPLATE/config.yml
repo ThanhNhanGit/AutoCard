@@ -1,0 +1,5 @@
+blank_issues_enabled: false
+contact_links:
+  - name: AutoCard documentation
+    url: https://github.com/ThanhNhanGit/AutoCard#readme
+    about: Read installation, workflow, FAQ, and troubleshooting documentation first.

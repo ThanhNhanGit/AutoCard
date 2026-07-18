@@ -1,0 +1,49 @@
+name: Feature request
+description: Suggest an improvement to the Japanese mining workflow
+title: "[Feature]: "
+labels:
+  - enhancement
+body:
+  - type: textarea
+    id: problem
+    attributes:
+      label: Mining problem
+      description: What part of the current sentence-mining workflow is slow, confusing, or missing?
+    validations:
+      required: true
+  - type: textarea
+    id: workflow
+    attributes:
+      label: Desired workflow
+      description: Describe the user actions and result rather than only naming another product's feature.
+      placeholder: When I select two subtitle cues, I want ...
+    validations:
+      required: true
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Current workaround
+      description: Explain how you handle this today and why that is insufficient.
+  - type: dropdown
+    id: scope
+    attributes:
+      label: Feature area
+      options:
+        - Subtitle review UI
+        - Known words or N+1
+        - Frequency and prioritization
+        - Yomitan / Anki integration
+        - Batch mining
+        - Multi-line mining and media
+        - mpv integration
+        - Installation or documentation
+        - Other
+    validations:
+      required: true
+  - type: checkboxes
+    id: constraints
+    attributes:
+      label: Compatibility
+      options:
+        - label: This can preserve the standard AnkiConnect endpoint at `127.0.0.1:8765`.
+        - label: I am willing to help test this with real subtitles and Anki.
