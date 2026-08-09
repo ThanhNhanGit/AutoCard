@@ -72,18 +72,19 @@ def parse_srt(srt):
             continue
 
         text_lines = raw_lines[timing_index + 1 :]
-        text_lines = [
-            tag_re.sub("", line).replace("\\N", "\n").replace("\\n", "\n")
+        # Join a cue's physical screen rows into ONE logical line (no
+        # separator — matches normalize_str()'s own no-separator join, and
+        # Japanese doesn't use spaces between clauses). A cue wrapped across
+        # 2+ rows for screen width is one sentence, not several; keeping it
+        # as separate array entries meant the browser had to render a line
+        # break between them, and Yomitan's mining-sentence scanner stops at
+        # ANY rendered line break — it only ever captured whichever row was
+        # hovered, silently dropping the rest of the sentence from the card.
+        text = "".join(
+            tag_re.sub("", line).replace("\\N", "").replace("\\n", "")
             for line in text_lines
-        ]
-        flattened = []
-        for line in text_lines:
-            flattened.extend(line.split("\n"))
-
-        if not flattened:
-            flattened = [""]
-
-        cues.append([flattened, start_ms, start_str, end_ms, end_str])
+        )
+        cues.append([[text], start_ms, start_str, end_ms, end_str])
 
     cues.sort(key=lambda cue: cue[1])
     return cues
@@ -177,15 +178,20 @@ def parse_ass(ass):
 
         subtitle_text = row.get("text", "")
         subtitle_text = tag_re.sub("", subtitle_text)
+        # \N/\n are ASS's hard/soft line-break markers for wrapping a long
+        # line across screen rows — drop them rather than turn them into a
+        # real line break. See parse_srt's matching comment: a rendered line
+        # break is a hard stop for Yomitan's mining-sentence scanner, so a
+        # cue wrapped for width has to stay one unbroken logical line.
         subtitle_text = (
             subtitle_text
-            .replace("\\N", "\n")
-            .replace("\\n", "\n")
+            .replace("\\N", "")
+            .replace("\\n", "")
             .replace("\\h", " ")
         )
 
         lines.append([
-            subtitle_text.split("\n"),
+            [subtitle_text],
             start_ms,
             start_str,
             end_ms,
