@@ -9,6 +9,16 @@
 /portable_config/autocards/*.tmp
 /portable_config/autocards_temp.json
 
+# Local dictionary lookup DB built from the user's own Yomitan export
+# (see build_dict_db.py) - regenerable, and far too large for git (150MB+).
+/portable_config/autocards/dictionary.sqlite
+
+# yt-dlp backup binaries kept locally as rollback copies.
+/yt-dlp.exe.bak-*
+
+# mpv debug logs from manual testing.
+/mpv_test*.log
+
 # mpv and application caches.
 /portable_config/cache/
 /portable_config/watch_later/
