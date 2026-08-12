@@ -3,7 +3,6 @@ import threading
 import time
 import bisect
 import subprocess
-import sqlite3
 import urllib.request
 import urllib.error
 import urllib.parse
@@ -18,46 +17,6 @@ from pathlib import Path
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 BASE = Path(__file__).parent.resolve()
-
-# Local dictionary built from the user's own exported Yomitan dictionaries
-# (JMdict + 新和英), so mining a card can attach a real definition without
-# depending on yomitan-api or a second manual Yomitan lookup step. See
-# build_dict_db.py for how this file is generated.
-DICTIONARY_DB_PATH = BASE / "dictionary.sqlite"
-_dictionary_conn = None
-_dictionary_conn_lock = threading.Lock()
-
-
-def lookup_definition(expression):
-    """Look up dictionary data for expression: glossary HTML, reading, pitch
-    accent and JPDB frequency rank, or None if the word isn't in the local
-    dictionary export. See build_dict_db.py for how dictionary.sqlite is
-    generated from the user's own exported Yomitan dictionaries."""
-    global _dictionary_conn
-    if not expression or not DICTIONARY_DB_PATH.exists():
-        return None
-    with _dictionary_conn_lock:
-        if _dictionary_conn is None:
-            _dictionary_conn = sqlite3.connect(str(DICTIONARY_DB_PATH), check_same_thread=False)
-        try:
-            row = _dictionary_conn.execute(
-                """SELECT reading, html, pitch_position, pitch_category, freq_display, freq_sort
-                   FROM definitions WHERE expression = ?""",
-                (expression,),
-            ).fetchone()
-        except sqlite3.Error:
-            return None
-    if not row:
-        return None
-    reading, html, pitch_position, pitch_category, freq_display, freq_sort = row
-    return {
-        "reading": reading or "",
-        "html": html or "",
-        "pitch_position": pitch_position,
-        "pitch_category": pitch_category or "",
-        "freq_display": freq_display or "",
-        "freq_sort": freq_sort,
-    }
 
 
 def to_ms(h=0, m=0, s=0, ms=0):
@@ -113,19 +72,18 @@ def parse_srt(srt):
             continue
 
         text_lines = raw_lines[timing_index + 1 :]
-        # Join a cue's physical screen rows into ONE logical line (no
-        # separator — matches normalize_str()'s own no-separator join, and
-        # Japanese doesn't use spaces between clauses). A cue wrapped across
-        # 2+ rows for screen width is one sentence, not several; keeping it
-        # as separate array entries meant the browser had to render a line
-        # break between them, and Yomitan's mining-sentence scanner stops at
-        # ANY rendered line break — it only ever captured whichever row was
-        # hovered, silently dropping the rest of the sentence from the card.
-        text = "".join(
-            tag_re.sub("", line).replace("\\N", "").replace("\\n", "")
+        text_lines = [
+            tag_re.sub("", line).replace("\\N", "\n").replace("\\n", "\n")
             for line in text_lines
-        )
-        cues.append([[text], start_ms, start_str, end_ms, end_str])
+        ]
+        flattened = []
+        for line in text_lines:
+            flattened.extend(line.split("\n"))
+
+        if not flattened:
+            flattened = [""]
+
+        cues.append([flattened, start_ms, start_str, end_ms, end_str])
 
     cues.sort(key=lambda cue: cue[1])
     return cues
@@ -219,20 +177,15 @@ def parse_ass(ass):
 
         subtitle_text = row.get("text", "")
         subtitle_text = tag_re.sub("", subtitle_text)
-        # \N/\n are ASS's hard/soft line-break markers for wrapping a long
-        # line across screen rows — drop them rather than turn them into a
-        # real line break. See parse_srt's matching comment: a rendered line
-        # break is a hard stop for Yomitan's mining-sentence scanner, so a
-        # cue wrapped for width has to stay one unbroken logical line.
         subtitle_text = (
             subtitle_text
-            .replace("\\N", "")
-            .replace("\\n", "")
+            .replace("\\N", "\n")
+            .replace("\\n", "\n")
             .replace("\\h", " ")
         )
 
         lines.append([
-            [subtitle_text],
+            subtitle_text.split("\n"),
             start_ms,
             start_str,
             end_ms,
@@ -293,21 +246,11 @@ OPTIONS = {
     "known_decks": "",
     "model": "",
     "freq_path": "",
-    "definition": "",
-    "reading": "",
-    "furigana": "",
-    "pitch_position": "",
-    "pitch_category": "",
-    "frequency": "",
-    "freq_sort": "",
 }
 
 # Option keys that are allowed to be empty without disabling the /check
 # card-enrichment flow.
-OPTIONAL_KEYS = {
-    "prev_lines", "next_lines", "known_decks", "model", "freq_path", "definition",
-    "reading", "furigana", "pitch_position", "pitch_category", "frequency", "freq_sort",
-}
+OPTIONAL_KEYS = {"prev_lines", "next_lines", "known_decks", "model", "freq_path"}
 
 # Keys expected to be integers; every other key is coerced to a string.
 OPTION_INT_KEYS = {"prev_lines", "next_lines"}
@@ -1205,14 +1148,6 @@ def take_screenshot(src, start, end):
         ]
     )
 
-    # For streamed sources (e.g. yt-dlp URLs) this subprocess can occasionally
-    # exit without ever producing the output file - a fresh mpv instance has to
-    # re-resolve and re-buffer the stream from scratch, unlike a local file
-    # open, and a slow/failed resolve leaves nothing for capture to write.
-    # os.remove on a file that was never created crashed the whole request
-    # (observed first-hand: FileNotFoundError on a cold streaming mine).
-    if not os.path.exists(path):
-        return None
     r = invoke("storeMediaFile", filename=file, path=path)
     os.remove(path)
 
@@ -1240,8 +1175,6 @@ def take_audio(src, start, end, aid=None):
 
     subprocess.run(cmd)
 
-    if not os.path.exists(path):
-        return None
     r = invoke("storeMediaFile", filename=file, path=path)
     os.remove(path)
 
@@ -1449,13 +1382,6 @@ def mine_lines(items, merge=False):
     expression_field = str(OPTIONS.get("expression", "")).strip()
     picture_field = str(OPTIONS.get("picture", "")).strip()
     audio_field = str(OPTIONS.get("audio", "")).strip()
-    definition_field = str(OPTIONS.get("definition", "")).strip()
-    reading_field = str(OPTIONS.get("reading", "")).strip()
-    furigana_field = str(OPTIONS.get("furigana", "")).strip()
-    pitch_position_field = str(OPTIONS.get("pitch_position", "")).strip()
-    pitch_category_field = str(OPTIONS.get("pitch_category", "")).strip()
-    frequency_field = str(OPTIONS.get("frequency", "")).strip()
-    freq_sort_field = str(OPTIONS.get("freq_sort", "")).strip()
     if not (deck and sentence_field and picture_field and audio_field):
         return {"error": "Configure deck and fields first"}
 
@@ -1494,29 +1420,6 @@ def mine_lines(items, merge=False):
         }
         if expression_field:
             fields[expression_field] = expression
-        if is_word:
-            dictionary_entry = lookup_definition(expression)
-            if dictionary_entry:
-                if definition_field and dictionary_entry["html"]:
-                    fields[definition_field] = dictionary_entry["html"]
-                reading = dictionary_entry["reading"]
-                if reading_field and reading:
-                    fields[reading_field] = reading
-                if furigana_field and reading:
-                    fields[furigana_field] = f"{expression}[{reading}]"
-                if pitch_position_field and dictionary_entry["pitch_position"] is not None:
-                    fields[pitch_position_field] = (
-                        f'<span style="display:inline;"><span>[</span>'
-                        f'<span>{dictionary_entry["pitch_position"]}</span><span>]</span></span>'
-                    )
-                if pitch_category_field and dictionary_entry["pitch_category"]:
-                    fields[pitch_category_field] = dictionary_entry["pitch_category"]
-                if frequency_field and dictionary_entry["freq_display"]:
-                    entries = [e.strip() for e in dictionary_entry["freq_display"].split(",")]
-                    items_html = "".join(f"<li>JPDBv2㋕: {e}</li>" for e in entries)
-                    fields[frequency_field] = f'<ul style="text-align: left;">{items_html}</ul>'
-                if freq_sort_field and dictionary_entry["freq_sort"] is not None:
-                    fields[freq_sort_field] = str(dictionary_entry["freq_sort"])
         result = invoke(
             "addNote",
             note={

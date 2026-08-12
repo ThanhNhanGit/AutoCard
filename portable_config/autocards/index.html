@@ -371,13 +371,8 @@
     function renderLineSpans(i, subAnalyses) {
       const textElm = lineEls[i].querySelector('.subtitle-text');
       const frag = document.createDocumentFragment();
-      // No separator of ANY kind (not even a "\n" text node) between entries:
-      // Yomitan's mining-sentence scanner stops at any rendered line break,
-      // full stop, so multiple entries (only happens via Merge now — a plain
-      // subtitle cue is always one entry after the parse_srt/parse_ass join)
-      // must render as one unbroken text run or Yomitan only captures
-      // whichever side you hovered.
-      subAnalyses.forEach((a) => {
+      subAnalyses.forEach((a, si) => {
+        if (si > 0) frag.appendChild(document.createElement('br'));
         for (const sp of a.spans) {
           if (sp.state === 'plain') {
             frag.appendChild(document.createTextNode(sp.surface));
@@ -513,7 +508,13 @@
         const combined = [];
         g.members.forEach(i => (lineTokens[i] || []).forEach(toks => combined.push(analyzeTokens(toks, knownSet))));
         if (combined.length) {
-          renderLineSpans(g.anchor, combined);
+          // Render as ONE unbroken run — NOT combined as-is, which would give
+          // renderLineSpans one entry per subline and insert a <br> between
+          // them. Yomitan's sentence scanner stops at <br> (subtitle overlays
+          // rely on that so hovering one caption row doesn't pull in the
+          // next), so a merged "sentence" has to be one continuous text flow
+          // or Yomitan only captures whichever side of the break you hovered.
+          renderLineSpans(g.anchor, [{ spans: combined.flatMap(a => a.spans) }]);
           // Recompute the anchor's own category/unknowns/target from the
           // COMBINED tokens — otherwise lineCats[anchor] (and its CSS class,
           // and the word bestFreqLemma would ring for mining) stay whatever
@@ -763,12 +764,7 @@
     }
 
     function check() {
-      // NOT gated on document.hidden, unlike update() above: this is the only
-      // thing that ever attaches audio+screenshot to a Yomitan-mined card, and
-      // it has nothing to do with what's on screen. Skipping it while the tab
-      // is backgrounded (the common case: mpv focused/fullscreen, this tab
-      // just sitting behind it) meant a mined card could go unenriched for the
-      // rest of the session unless the user happened to refocus this tab.
+      if (document.hidden) return;
       fetch('/check', { method: 'POST' });
     }
 
@@ -789,7 +785,10 @@
 
       const textElm = document.createElement('span');
       textElm.className = 'subtitle-text';
-      textElm.textContent = textLines.join('');
+      textLines.forEach((s, si) => {
+        if (si > 0) textElm.appendChild(document.createElement('br'));
+        textElm.appendChild(document.createTextNode(s));
+      });
       box.appendChild(textElm);
 
       lineEls[i] = container;
