@@ -200,7 +200,14 @@ def token():
     return random.randbytes(8).hex()
 
 
-DELIM = re.compile(r"(「|」|『|』|\"|\'|\.|!|\?|．|。|…|︒|！|？|︙|\s|<b>|</b>|\uFEFF)")
+# <br> matters as much as <b>: enriching a card REWRITES its sentence as the
+# cue's rows joined with "<br/>". If that card ever has to be matched again --
+# it is re-mined, or its media gets cleared and it comes back through the
+# enrichment queue -- the stored sentence must still normalize to the same
+# text as the subtitle line it came from. Leaving break tags in made every
+# already-enriched multi-row card permanently unmatchable ("NO MATCH" on
+# every pass, forever), so such a card could never be repaired.
+DELIM = re.compile(r"(<br\s*/?>|「|」|『|』|\"|\'|\.|!|\?|．|。|…|︒|！|？|︙|\s|<b>|</b>|\uFEFF)", re.IGNORECASE)
 
 
 def normalize_str(s):
