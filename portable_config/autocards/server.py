@@ -1074,6 +1074,34 @@ def invoke(action, **params):
     return r["result"]
 
 
+def invoke_status(action, **params):
+    """Like invoke(), but returns (ok, result) so a SUCCESSFUL call whose
+    result is legitimately null can be told apart from a FAILED one.
+
+    invoke() collapses both into None: AnkiConnect returns {"result": null,
+    "error": null} on success for actions like updateNote, and invoke() also
+    returns None for a network error / malformed response. Anything that
+    needs to know whether a write actually landed must use this instead —
+    treating success-null as failure (or failure as success) is what left
+    mined cards either stuck retrying forever or silently un-enriched."""
+    req_json = json.dumps(request(action, **params)).encode("utf-8")
+    try:
+        r = json.load(
+            urllib.request.urlopen(
+                urllib.request.Request(ANKI_CONNECT_URL, req_json), timeout=15
+            )
+        )
+    except (urllib.error.URLError, TimeoutError, OSError, ValueError) as e:
+        return False, e
+
+    if not isinstance(r, dict) or "error" not in r or "result" not in r:
+        return False, Exception(f"Malformed AnkiConnect response: {r!r}")
+    if r["error"] is not None:
+        return False, Exception(r["error"])
+
+    return True, r["result"]
+
+
 MPV_PATH = BASE / "../../mpv.exe"
 MPV = str(MPV_PATH) if MPV_PATH.exists() else "mpv"
 
@@ -1107,6 +1135,7 @@ def extract_internal_subs(video_path, stream_index, fmt="srt"):
             cmd,
             capture_output=True,
             startupinfo=startupinfo,
+            timeout=CAPTURE_TIMEOUT,
         )
         stderr = _decode_subtitle_bytes(result.stderr).strip()
 
@@ -1125,11 +1154,72 @@ def extract_internal_subs(video_path, stream_index, fmt="srt"):
         return None
 
 
+# A single frame grab or a few seconds of audio takes ~1-3s; anything past
+# this is mpv wedged (an unreadable stream, a network path that stalled, a
+# seek that never completes), not slow progress.
+CAPTURE_TIMEOUT = 60
+
+
+def run_capture(cmd, what):
+    """Run an mpv/ffmpeg capture with a hard timeout.
+
+    Without one, a wedged mpv blocks its caller forever. Since captures run
+    inside check() while it holds CHECK_LOCK, a single hung mpv permanently
+    stops ALL card enrichment for the rest of the session — silently, since
+    every later check() just sees the lock held and returns. Killing the
+    capture instead turns that into one failed card that gets retried."""
+    try:
+        subprocess.run(cmd, timeout=CAPTURE_TIMEOUT)
+        return True
+    except subprocess.TimeoutExpired:
+        debug_log(f"run_capture: {what} timed out after {CAPTURE_TIMEOUT}s, killed")
+        return False
+    except Exception as e:
+        debug_log(f"run_capture: {what} failed: {e!r}")
+        return False
+
+
+def _store_media(file, path, kind):
+    """Upload a just-captured media file to Anki and clean up the temp copy.
+
+    Returns the stored filename, or None if the capture or the upload failed.
+    Callers MUST treat None as "no media" and refuse to write it into a note:
+    formatting None into '<img src="{}">' produces a literal <img src="None">,
+    which is a non-empty field, which drops the card out of the
+    "Picture: SentenceAudio:" retry query forever — a card left permanently
+    with no image and no audio, never looked at again. That is exactly the
+    failure this whole path has to avoid."""
+    if not os.path.exists(path):
+        # mpv exited without producing a file (bad seek, unreadable source,
+        # codec failure). os.remove() below would raise FileNotFoundError.
+        debug_log(f"_store_media: mpv produced no {kind} at {path}")
+        return None
+
+    try:
+        if os.path.getsize(path) == 0:
+            debug_log(f"_store_media: {kind} at {path} is empty")
+            return None
+
+        ok, result = invoke_status("storeMediaFile", filename=file, path=path)
+        if not ok:
+            debug_log(f"_store_media: storeMediaFile failed for {kind} {file}: {result!r}")
+            return None
+        if not isinstance(result, str) or not result:
+            debug_log(f"_store_media: storeMediaFile gave no filename for {kind} {file}: {result!r}")
+            return None
+        return result
+    finally:
+        try:
+            os.remove(path)
+        except OSError:
+            pass
+
+
 def take_screenshot(src, start, end):
     file = f"autocards-{token()}.webp"
     path = str(BASE / file)
 
-    subprocess.run(
+    run_capture(
         [
             MPV,
             src,
@@ -1145,13 +1235,11 @@ def take_screenshot(src, start, end):
             f"--start={0.75 * start + 0.25 * end:.3f}",
             "-o",
             path,
-        ]
+        ],
+        "screenshot",
     )
 
-    r = invoke("storeMediaFile", filename=file, path=path)
-    os.remove(path)
-
-    return r
+    return _store_media(file, path, "screenshot")
 
 
 def take_audio(src, start, end, aid=None):
@@ -1173,12 +1261,9 @@ def take_audio(src, start, end, aid=None):
         cmd.append(f"--aid={aid}")
     cmd.extend(["-o", path])
 
-    subprocess.run(cmd)
+    run_capture(cmd, "audio")
 
-    r = invoke("storeMediaFile", filename=file, path=path)
-    os.remove(path)
-
-    return r
+    return _store_media(file, path, "audio")
 
 
 def _extract_audio_segment(src, start, end, aid, out_path):
@@ -1189,7 +1274,7 @@ def _extract_audio_segment(src, start, end, aid, out_path):
     if aid is not None:
         cmd.append(f"--aid={aid}")
     cmd.extend(["-o", out_path])
-    subprocess.run(cmd)
+    run_capture(cmd, "audio segment")
 
 
 def take_audio_merged(src, segments, aid=None):
@@ -1224,10 +1309,14 @@ def take_audio_merged(src, segments, aid=None):
         if os.name == "nt":
             startupinfo = subprocess.STARTUPINFO()
             startupinfo.dwFlags |= subprocess.STARTF_USESHOWWINDOW
-        subprocess.run(
-            [FFMPEG, "-y", "-hide_banner", *inputs, "-filter_complex", filt, "-map", "[out]", "-ac", "1", str(final)],
-            startupinfo=startupinfo,
-        )
+        try:
+            subprocess.run(
+                [FFMPEG, "-y", "-hide_banner", *inputs, "-filter_complex", filt, "-map", "[out]", "-ac", "1", str(final)],
+                startupinfo=startupinfo,
+                timeout=CAPTURE_TIMEOUT,
+            )
+        except subprocess.TimeoutExpired:
+            debug_log("take_audio_merged: ffmpeg concat timed out, killed")
         cleanup.append(final)
 
     result = None
@@ -1293,9 +1382,23 @@ def build_card_body(idx, expression=None, original_sentence=None, lines=None, fi
 
 
 def update_note(note_id, idx, expression=None, original_sentence=None, lines=None, file=None, aid=None, delay=None):
+    """Returns True on a confirmed AnkiConnect write, False otherwise (e.g. a
+    transient failure while Anki's Browse editor has this exact note open,
+    observed in practice). Callers must check this before treating the card
+    as done — invoke() can silently return None/Exception on failure, and
+    blindly treating that as success left cards permanently stuck with only
+    their original Yomitan-mined text and no audio/screenshot, never retried
+    again since nothing signaled the enrichment hadn't actually happened."""
     sentence, picture, sound = build_card_body(idx, expression, original_sentence, lines=lines, file=file, aid=aid, delay=delay)
 
-    invoke(
+    if not picture or not sound:
+        # Leave the fields EMPTY so this card stays in the retry query and
+        # gets another attempt, instead of being written as <img src="None">
+        # and silently dropping out of it forever.
+        debug_log(f"update_note({note_id}): missing media (picture={picture!r} sound={sound!r}), not writing")
+        return False
+
+    ok, result = invoke_status(
         "updateNote",
         note={
             "id": note_id,
@@ -1306,8 +1409,12 @@ def update_note(note_id, idx, expression=None, original_sentence=None, lines=Non
             },
         },
     )
+    if not ok:
+        debug_log(f"update_note({note_id}): updateNote failed: {result!r}")
+        return False
 
     print("updated note:", note_id)
+    return True
 
 
 def detect_mining_model():
@@ -1413,6 +1520,14 @@ def mine_lines(items, merge=False):
 
     def add_note(expression, sentence, picture, sound, is_word):
         nonlocal created, skipped
+        if not picture or not sound:
+            # Never create a card carrying <img src="None"> / [sound:None]:
+            # the fields would look populated, so /check would never revisit
+            # it, leaving a permanently image-less and audio-less card.
+            msg = f"Capture failed for {expression or sentence!r} (no {'image' if not picture else 'audio'})"
+            debug_log(f"mine_lines: {msg}")
+            errors.append(msg)
+            return
         fields = {
             sentence_field: sentence,
             picture_field: f'<img src="{picture}">',
@@ -1512,11 +1627,17 @@ def clear_merges():
 
 
 def update_note_merged(note_id, indices, expression=None, lines=None, file=None, aid=None, delay=None):
+    """Returns True on a confirmed AnkiConnect write, False otherwise — see
+    update_note's docstring for why this must be checked rather than assumed."""
     body = build_merged_card_body(indices, expression, lines=lines, file=file, aid=aid, delay=delay)
     if not body:
-        return
+        return False
     sentence, picture, sound = body
-    invoke(
+    if not picture or not sound:
+        debug_log(f"update_note_merged({note_id}): missing media (picture={picture!r} sound={sound!r}), not writing")
+        return False
+
+    ok, result = invoke_status(
         "updateNote",
         note={
             "id": note_id,
@@ -1527,23 +1648,117 @@ def update_note_merged(note_id, indices, expression=None, lines=None, file=None,
             },
         },
     )
+    if not ok:
+        debug_log(f"update_note_merged({note_id}): updateNote failed: {result!r}")
+        return False
+
     print("updated merged note:", note_id)
+    return True
 
 
-def check(t):
+DEBUG_LOG_PATH = BASE / "check-debug.log"
+DEBUG_LOG_MAX_BYTES = 1024 * 1024
+DEBUG_LOG_LOCK = threading.Lock()
+
+
+def debug_log(msg):
+    """Append a diagnostic line about the mining/enrichment path.
+
+    Only ever called on unusual outcomes (a no-match, a failed capture, a
+    failed write) — never on the normal per-poll happy path — so a healthy
+    session writes almost nothing. Rotated at 1MB so a long session, or a
+    card that keeps failing, can't grow this without bound."""
+    try:
+        with DEBUG_LOG_LOCK:
+            if (
+                DEBUG_LOG_PATH.exists()
+                and DEBUG_LOG_PATH.stat().st_size > DEBUG_LOG_MAX_BYTES
+            ):
+                DEBUG_LOG_PATH.replace(DEBUG_LOG_PATH.with_suffix(".log.old"))
+            with open(DEBUG_LOG_PATH, "a", encoding="utf-8") as f:
+                f.write(f"{time.time():.3f} {msg}\n")
+    except Exception:
+        pass
+
+
+# Enrichment retry bookkeeping: card id -> [attempts, last_attempt_ts].
+# Retrying is what rescues a card from a transient failure, but retrying an
+# unconditionally-broken one (misconfigured field name, unreadable video)
+# every 1.5s would respawn two mpv captures per tick forever, so attempts
+# back off and eventually stop.
+ENRICH_ATTEMPTS = {}
+ENRICH_MAX_ATTEMPTS = 6
+ENRICH_BACKOFF_BASE = 3.0
+
+# Card id -> the video that was loaded when this pending card was first seen.
+# /check finds candidates with "added:1" (added today), which spans every
+# episode watched today, so a card left unenriched when you move to the next
+# episode would otherwise be matched against the NEW episode's subtitles and
+# given a screenshot and audio from the wrong video entirely.
+CARD_VIDEO = {}
+
+
+
+def should_attempt_enrich(card_id):
+    state = ENRICH_ATTEMPTS.get(card_id)
+    if not state:
+        return True
+    attempts, last = state
+    if attempts >= ENRICH_MAX_ATTEMPTS:
+        return False
+    # 3s, 6s, 12s, 24s, ... since the previous failed attempt.
+    wait = ENRICH_BACKOFF_BASE * (2 ** (attempts - 1))
+    return (time.time() - last) >= wait
+
+
+def note_enrich_failed(card_id):
+    attempts, _ = ENRICH_ATTEMPTS.get(card_id, (0, 0.0))
+    attempts += 1
+    ENRICH_ATTEMPTS[card_id] = (attempts, time.time())
+    if attempts >= ENRICH_MAX_ATTEMPTS:
+        debug_log(
+            f"enrich: card {card_id} failed {attempts}x, giving up until restart "
+            f"(check Anki field config / that the video is readable)"
+        )
+
+
+_BAIL_LOG_AT = {}
+
+
+def debug_log_throttled(key, msg, every=30.0):
+    """Log a recurring condition at most once per `every` seconds.
+
+    check() runs ~every 1.5s, so its early-exit paths can't be logged
+    unconditionally without flooding the file — but they can't be silent
+    either: a silently-bailing check() is indistinguishable from a working
+    one that has nothing to do, which makes 'my card never got its audio'
+    impossible to diagnose."""
+    now = time.time()
+    if now - _BAIL_LOG_AT.get(key, 0.0) >= every:
+        _BAIL_LOG_AT[key] = now
+        debug_log(msg)
+
+
+def check(t, focus=None):
     global IGNORE
 
     if not CHECK_LOCK.acquire(blocking=False):
+        # Another check() is still running. Brief overlap is normal; a lock
+        # held for a long time means a previous pass is wedged (a capture
+        # that never returned), and nothing will be enriched until it clears.
+        debug_log_throttled("lock", "check(): skipped, a previous pass still holds the lock")
         return
 
     try:
         if not ID:
+            debug_log_throttled("noid", "check(): no subtitles loaded (ID empty) — mpv never sent /init?")
             return
 
         for k, v in OPTIONS.items():
             if k in OPTIONAL_KEYS:
                 continue
             if not v:
+                debug_log(f"check(): OPTIONS['{k}'] is empty, bailing")
                 return
 
         # Snapshot the globals /init and /update can reassign mid-request, so
@@ -1563,6 +1778,12 @@ def check(t):
 
         ids = invoke("findCards", query=BASE_QUERY)
         if not ids or isinstance(ids, Exception):
+            if isinstance(ids, Exception) or ids is None:
+                debug_log(f"check(): findCards failed for query {BASE_QUERY!r}: {ids!r}")
+            else:
+                debug_log_throttled(
+                    "nocards", f"check(): no cards awaiting media for query {BASE_QUERY!r}"
+                )
             return
 
         end_idx = bisect.bisect_left(lines, to_ms(s=t), key=lambda v: v[1])
@@ -1573,6 +1794,56 @@ def check(t):
         subs_queue = {}
         for i, v in enumerate(normalized[:end_idx]):
             subs_queue.setdefault(v, []).append(i)
+
+        def claim_cue(norm):
+            """Find the subtitle cue a mined card came from, and claim it.
+
+            Considers exact matches and containing matches TOGETHER, and among
+            all candidates picks the one closest to the playhead. Two reasons
+            they can't be separate steps with exact winning outright:
+
+              * Yomitan captures only the sentence around the clicked word, so
+                a card mined from a multi-row or multi-sentence cue holds just
+                a FRAGMENT of it — the cue it belongs to contains the text
+                rather than equalling it.
+              * normalize_str() strips punctuation, so a fragment can exactly
+                equal some unrelated cue elsewhere in the episode (「ん？」and
+                「ん…」collapse to the same key). Letting that exact match win
+                attached a screenshot from the wrong scene entirely.
+
+            Preferring the latest candidate at or before the playhead resolves
+            both: while watching, that is the line just played; after
+            scrolling back to mine an older line, it is that older line, since
+            everything after it is past the playhead. Popping the occurrence
+            keeps repeated dialogue mapping distinct cards to distinct cues.
+            """
+            if not norm:
+                return None
+
+            # Gather every cue whose text contains this card's text.
+            cands = []
+            for key, idxs in subs_queue.items():
+                if not idxs or norm not in key:
+                    continue
+                cands.extend((i, key) for i in idxs)
+            if not cands:
+                return None
+
+            if focus is not None:
+                # The browser told us which line the user was pointing at, so
+                # take the candidate nearest it. This is the only reliable
+                # signal when the user scrolls back to mine an older line:
+                # the playhead is then far past it, and picking by playhead
+                # would grab a later repeat of the same words instead.
+                best_idx, best_key = min(cands, key=lambda c: (abs(c[0] - focus), -c[0]))
+            else:
+                # No hint (older page still open): fall back to the latest
+                # candidate at or before the playhead, i.e. the line most
+                # recently played.
+                best_idx, best_key = max(cands, key=lambda c: c[0])
+
+            subs_queue[best_key].remove(best_idx)
+            return best_idx
 
         # Merged groups whose lines are all already revealed, as a queue per
         # key too (two merges with colliding combined text are now distinct
@@ -1586,6 +1857,7 @@ def check(t):
 
         notes = invoke("cardsInfo", cards=ids)
         if not notes or isinstance(notes, Exception):
+            debug_log(f"check(): cardsInfo returned {notes!r} for ids {ids}")
             return
 
         filtered_cards = []
@@ -1596,48 +1868,93 @@ def check(t):
 
             note_id = info.get("note")
             if not isinstance(note_id, int):
+                debug_log(f"check(): card {id} info has no int note id: {info!r}")
                 continue
 
-            sentence = info["fields"][OPTIONS["sentence"]]["value"]
-            expression = None
-            if OPTIONS["expression"]:
-                expression = info["fields"][OPTIONS["expression"]]["value"]
+            # Bind this pending card to the video it belongs to, and never
+            # enrich it from a different one.
+            first_video = CARD_VIDEO.setdefault(id, file)
+            if first_video != file:
+                debug_log(f"check(): card {id} belongs to {first_video!r}, not {file!r}; skipping")
+                IGNORE.add(id)
+                continue
+
+            # A note whose model lacks the configured Sentence/Expression
+            # field (a stray card in the mining deck, a renamed field) used
+            # to raise KeyError here — outside the per-card try/except below
+            # — aborting the whole pass, so every OTHER pending card in the
+            # same batch silently stopped being enriched too.
+            try:
+                fields = info["fields"]
+                sentence = fields[OPTIONS["sentence"]]["value"]
+                expression = None
+                if OPTIONS["expression"]:
+                    expression = fields[OPTIONS["expression"]]["value"]
+            except (KeyError, TypeError) as e:
+                debug_log(f"check(): card {id} missing configured field ({e!r}), skipping")
+                IGNORE.add(id)
+                continue
 
             norm = normalize_str(sentence)
 
-            idx = None
-            occurrences = subs_queue.get(norm)
-            if occurrences:
-                idx = occurrences.pop(0)
-
+            # A registered merge is an explicit user intent and matches the
+            # combined text exactly, so it is checked before single cues.
             merged_indices = None
-            if idx is None:
-                groups = merged_queue.get(norm)
-                if groups:
-                    merged_indices = groups.pop(0)
-                    consumed_groups.append(merged_indices)
+            groups = merged_queue.get(norm)
+            if groups:
+                merged_indices = groups.pop(0)
+                consumed_groups.append(merged_indices)
+
+            idx = None
+            if merged_indices is None:
+                idx = claim_cue(norm)
 
             if idx is None and merged_indices is None:
+                debug_log(f"check(): card {id} note {note_id} sentence={sentence!r} norm={norm!r} NO MATCH (end_idx={end_idx})")
                 continue
 
             filtered_cards.append((id, note_id, idx, merged_indices, expression, sentence))
 
-        # A merge only ever needs to satisfy one mined card; forget it once
-        # matched so it can't also collide with some future merge of the same
-        # (repeated-dialogue) text.
-        for group in consumed_groups:
-            unregister_merge(group)
+        # NOTE: consumed_groups are NOT unregistered here. A merge is only
+        # forgotten once its card has actually been enriched (below) — if the
+        # write fails, the group must still be in MERGES for the retry to be
+        # able to rebuild the merged sentence/audio. A merged sentence spans
+        # several cues, so it is not a substring of any single cue either:
+        # dropping the group early would make the card unrecoverable.
 
         for id, note_id, idx, merged_indices, expression, sentence in filtered_cards:
+            if not should_attempt_enrich(id):
+                continue
+
             # cardsInfo already gave us Expression AND the note id (under
             # "note"), so update the local known-word cache and enrich the
             # note without any further AnkiConnect round trip per card.
             append_known_expression(note_id, expression)
-            if merged_indices:
-                update_note_merged(note_id, merged_indices, expression, lines=lines, file=file, aid=aid, delay=delay)
+            try:
+                if merged_indices:
+                    ok = update_note_merged(note_id, merged_indices, expression, lines=lines, file=file, aid=aid, delay=delay)
+                else:
+                    ok = update_note(note_id, idx, expression, sentence, lines=lines, file=file, aid=aid, delay=delay)
+            except Exception:
+                import traceback
+                debug_log(f"check(): enrichment for card {id} note {note_id} raised:\n{traceback.format_exc()}")
+                note_enrich_failed(id)
+                continue
+
+            # Only mark this card done once AnkiConnect confirmed the write.
+            # A card whose update silently failed (e.g. a transient error, or
+            # a capture that produced no media) must NOT be added here, or it
+            # would never be retried again — exactly what left cards
+            # permanently stuck with no audio or screenshot.
+            if ok:
+                IGNORE.add(id)
+                ENRICH_ATTEMPTS.pop(id, None)
+                # Safe to forget the merge only now that its card is written.
+                if merged_indices:
+                    unregister_merge(merged_indices)
             else:
-                update_note(note_id, idx, expression, sentence, lines=lines, file=file, aid=aid, delay=delay)
-            IGNORE.add(id)
+                note_enrich_failed(id)
+                debug_log(f"check(): card {id} note {note_id} update did not confirm, will retry")
     finally:
         CHECK_LOCK.release()
 
@@ -1889,7 +2206,10 @@ class Server(BaseHTTPRequestHandler):
             self.send_response(200)
             self.end_headers()
 
-            check(t)
+            focus = body.get("focus") if isinstance(body, dict) else None
+            if not isinstance(focus, int) or focus < 0:
+                focus = None
+            check(t, focus=focus)
         elif path == "/mine":
             items = body.get("items") if isinstance(body, dict) else None
             merge = bool(body.get("merge")) if isinstance(body, dict) else False
@@ -1944,6 +2264,21 @@ class Server(BaseHTTPRequestHandler):
         _ = args
 
 
+class SingleInstanceServer(ThreadingHTTPServer):
+    # http.server's HTTPServer sets allow_reuse_address = 1 (for a quick
+    # restart past TIME_WAIT), but on Windows SO_REUSEADDR also lets an
+    # entirely separate process bind the SAME port while an older instance
+    # is still alive and listening — mpv spawns a fresh server.py on every
+    # launch without checking whether a previous one (e.g. one orphaned by
+    # a crash or force-close) is still running, so both would end up bound
+    # at once with requests split unpredictably between them, silently
+    # starving whichever process actually holds the live video/subtitle
+    # state. Disabling reuse makes a second bind attempt fail loudly at
+    # startup instead, leaving whichever instance bound first as the sole,
+    # deterministic listener.
+    allow_reuse_address = False
+
+
 if __name__ == "__main__":
     load_known_cache()
     if known_cache_is_stale():
@@ -1951,5 +2286,5 @@ if __name__ == "__main__":
     load_freq_cache()
     if current_freq_scope() and not FREQ_READY:
         start_freq_rebuild()
-    with ThreadingHTTPServer(("127.0.0.1", 6969), Server) as server:
+    with SingleInstanceServer(("127.0.0.1", 6969), Server) as server:
         server.serve_forever()

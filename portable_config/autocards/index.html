@@ -94,6 +94,10 @@
     let subId;
     let times = [];
     let idx;
+    // Index of the subtitle line the user last pointed at, sent with /check
+    // so the server can anchor a Yomitan-mined card to the right line. Reset
+    // whenever a new subtitle file loads, since indices no longer apply.
+    let focusIdx = null;
 
     /* ---- element refs ---- */
     let activeIndicatorElm, linesContainerElm, linesElm, blankElm;
@@ -134,6 +138,23 @@
       nplusFilterBtnElm = document.getElementById('nplus-filter-btn');
 
       linesElm.addEventListener('click', onLineClick);
+
+      // Remember which subtitle line the user last pointed at. Mining with
+      // Yomitan happens entirely inside its own popup, so the server never
+      // learns which line a card came from and has to guess by matching the
+      // card's text against the subtitles. That guess is wrong whenever the
+      // same words appear more than once in the episode — and it is wrong
+      // MOST often exactly when the user scrolls back to mine an older line,
+      // because the playhead (its only other clue) is nowhere near it.
+      // Whatever line was last hovered/touched is the one being mined, so
+      // report it and let the server use it as the anchor.
+      const noteFocus = (ev) => {
+        const el = ev.target.closest && ev.target.closest('.sub-line');
+        if (el && el.dataset.idx !== undefined) focusIdx = +el.dataset.idx;
+      };
+      linesElm.addEventListener('mouseover', noteFocus);
+      linesElm.addEventListener('mousedown', noteFocus);
+      linesElm.addEventListener('touchstart', noteFocus, { passive: true });
     }
 
     /* ---- known-word cache ---- */
@@ -752,7 +773,10 @@
     }
 
     function update() {
-      if (document.hidden) return;
+      // Not gated on document.hidden: confirmed live on 2026-08-12 that with
+      // this tab backgrounded, lines stayed at 0/390 visible no matter how
+      // long mpv played (mpv focused/fullscreen with this tab behind it is
+      // the normal way this app gets used, not an edge case).
       fetch('/update')
         .then(r => r.json())
         .then(([id, t]) => {
@@ -764,8 +788,18 @@
     }
 
     function check() {
-      if (document.hidden) return;
-      fetch('/check', { method: 'POST' });
+      // NOT gated on document.hidden, unlike a naive version of this
+      // function: this is the only thing that ever attaches audio+screenshot
+      // to a mined card, and it has nothing to do with what's on screen.
+      // Skipping it while the tab is backgrounded (the common case: mpv
+      // focused/fullscreen, this tab just sitting behind it) meant a mined
+      // card could go unenriched for the rest of the session unless the
+      // user happened to refocus this tab.
+      fetch('/check', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ focus: focusIdx })
+      });
     }
 
     function buildLine(frag, textLines, tsStr, i) {
@@ -809,6 +843,7 @@
           lineUnknowns = [];
           mergedGroups = [];
           linesGeneration++;
+          focusIdx = null;   // indices refer to the old subtitle file
           selected.clear(); userTargets.clear();
           setMineBtn();
           nplusCountElm.textContent = 'N+1: —';

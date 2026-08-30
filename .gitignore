@@ -6,7 +6,11 @@
 /portable_config/autocards/known-words-cache.json
 /portable_config/autocards/frequency-cache.json
 /portable_config/autocards/autocards-subtitle-debug.txt
+/portable_config/autocards/check-debug.log
+/portable_config/autocards/check-debug.log.old
 /portable_config/autocards/*.tmp
+/portable_config/autocards/autocards-*.webp
+/portable_config/autocards/autocards-*.mp3
 /portable_config/autocards_temp.json
 
 # Local dictionary lookup DB built from the user's own Yomitan export
