@@ -224,7 +224,37 @@ FILE = ""
 AID = None
 LINES = []
 NORMALIZED = []
-IGNORE = set()
+# Card id -> time it was enriched. NOT a permanent "done" marker: the
+# findCards query below only ever returns cards Anki itself still reports as
+# having no image/audio, so a card reappearing there genuinely needs media,
+# whatever this process believes it wrote. Anki's editor can silently revert
+# a write moments after it lands (it saves its own stale copy of a note that
+# is open in Browse), and a permanent marker turned that into a card stuck
+# empty forever. Entries therefore expire, and exist only to avoid
+# re-enriching during the brief window where Anki's search index has not yet
+# caught up with a write that did succeed.
+IGNORE = {}
+IGNORE_TTL = 30.0
+
+
+def recently_enriched(card_id):
+    ts = IGNORE.get(card_id)
+    return ts is not None and (time.time() - ts) < IGNORE_TTL
+
+
+def mark_enriched(card_id):
+    IGNORE[card_id] = time.time()
+    ENRICH_DONE_COUNT[card_id] = ENRICH_DONE_COUNT.get(card_id, 0) + 1
+
+
+# How many times a card has been successfully enriched. Normally 1. If
+# something outside this process keeps clearing the fields afterwards (Anki's
+# Browse editor saving its stale copy back over the note is the known case),
+# the card reappears in the "needs media" query and gets captured again.
+# That self-heals once the interference stops, but it must not capture
+# forever, so give up after a few rounds and say why.
+ENRICH_DONE_COUNT = {}
+ENRICH_DONE_MAX = 5
 DELAY = 0
 
 SUB_DEBUG = {
@@ -1902,12 +1932,17 @@ def check(t, focus=None):
         filtered_cards = []
         consumed_groups = []
         for id, info in zip(ids, notes):
-            if id in IGNORE:
-                # Already enriched this session. If the card still looks
-                # unenriched to Anki we would otherwise skip it forever with
-                # no trace, so say so (throttled).
-                debug_log_throttled("ign-%s" % id,
-                    f"check(): card {id} skipped, already marked done this session")
+            if ENRICH_DONE_COUNT.get(id, 0) >= ENRICH_DONE_MAX:
+                debug_log_throttled("wiped-%s" % id,
+                    f"check(): card {id} has been enriched "
+                    f"{ENRICH_DONE_COUNT[id]}x and keeps coming back empty — "
+                    f"something else is clearing it (a note left open in "
+                    f"Anki's Browse editor does this); giving up on it")
+                continue
+
+            if recently_enriched(id):
+                # Written moments ago; give Anki's index a moment to catch up
+                # rather than capturing the same clip twice.
                 continue
 
             note_id = info.get("note")
@@ -1920,7 +1955,7 @@ def check(t, focus=None):
             first_video = CARD_VIDEO.setdefault(id, file)
             if first_video != file:
                 debug_log(f"check(): card {id} belongs to {first_video!r}, not {file!r}; skipping")
-                IGNORE.add(id)
+                mark_enriched(id)
                 continue
 
             # A note whose model lacks the configured Sentence/Expression
@@ -1936,7 +1971,7 @@ def check(t, focus=None):
                     expression = fields[OPTIONS["expression"]]["value"]
             except (KeyError, TypeError) as e:
                 debug_log(f"check(): card {id} missing configured field ({e!r}), skipping")
-                IGNORE.add(id)
+                mark_enriched(id)
                 continue
 
             norm = normalize_str(sentence)
@@ -1994,7 +2029,7 @@ def check(t, focus=None):
             # would never be retried again — exactly what left cards
             # permanently stuck with no audio or screenshot.
             if ok:
-                IGNORE.add(id)
+                mark_enriched(id)
                 ENRICH_ATTEMPTS.pop(id, None)
                 # Safe to forget the merge only now that its card is written.
                 if merged_indices:
@@ -2238,6 +2273,7 @@ class Server(BaseHTTPRequestHandler):
             # or a switch to the next episode, and is then skipped forever
             # with the card left holding no image or audio.
             IGNORE.clear()
+            ENRICH_DONE_COUNT.clear()
             ENRICH_ATTEMPTS.clear()
             CARD_VIDEO.clear()
             _BAIL_LOG_AT.clear()
