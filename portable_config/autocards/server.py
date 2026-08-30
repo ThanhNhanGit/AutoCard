@@ -1864,6 +1864,11 @@ def check(t, focus=None):
         consumed_groups = []
         for id, info in zip(ids, notes):
             if id in IGNORE:
+                # Already enriched this session. If the card still looks
+                # unenriched to Anki we would otherwise skip it forever with
+                # no trace, so say so (throttled).
+                debug_log_throttled("ign-%s" % id,
+                    f"check(): card {id} skipped, already marked done this session")
                 continue
 
             note_id = info.get("note")
@@ -1924,6 +1929,9 @@ def check(t, focus=None):
 
         for id, note_id, idx, merged_indices, expression, sentence in filtered_cards:
             if not should_attempt_enrich(id):
+                debug_log_throttled("bo-%s" % id,
+                    f"check(): card {id} waiting on retry backoff "
+                    f"(attempts={ENRICH_ATTEMPTS.get(id, (0, 0))[0]})")
                 continue
 
             # cardsInfo already gave us Expression AND the note id (under
@@ -2088,7 +2096,7 @@ class Server(BaseHTTPRequestHandler):
             self.end_headers()
 
     def do_POST(self):
-        global OPTIONS, TIME, ID, FILE, DELAY, AID, MINING_MODEL
+        global OPTIONS, TIME, ID, FILE, DELAY, AID, MINING_MODEL, IGNORE
 
         sz = int(self.headers.get("Content-Length", "0") or 0)
         if sz:
@@ -2184,6 +2192,16 @@ class Server(BaseHTTPRequestHandler):
 
             FILE = video_path
             AID = body.get("aid") if isinstance(body, dict) else None
+
+            # Per-card enrichment state belongs to the video that was loaded,
+            # not to the process. Without this, a card marked done (or backed
+            # off, or bound to a video) stays that way across an mpv restart
+            # or a switch to the next episode, and is then skipped forever
+            # with the card left holding no image or audio.
+            IGNORE.clear()
+            ENRICH_ATTEMPTS.clear()
+            CARD_VIDEO.clear()
+            _BAIL_LOG_AT.clear()
 
             self._send_json({
                 "loaded": loaded,
