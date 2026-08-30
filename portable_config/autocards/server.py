@@ -1381,6 +1381,29 @@ def build_card_body(idx, expression=None, original_sentence=None, lines=None, fi
     return sentence, picture, sound
 
 
+def confirm_note_media(note_id):
+    """Read the note back and report whether the media fields really stuck.
+
+    updateNote can report success while the note ends up unchanged: if the
+    note is open in Anki's Browse editor, the editor holds its own copy and
+    writes that stale copy back over whatever AnkiConnect just wrote. The
+    card is then still empty, but check() has already been told the write
+    succeeded and marks it done -- so it is never retried and keeps no image
+    or audio for good. Confirming against Anki's actual state instead of the
+    write's return value makes that self-correcting: the card stays pending
+    and the next pass tries again."""
+    ok, info = invoke_status("notesInfo", notes=[note_id])
+    if not ok or not isinstance(info, list) or not info:
+        # Can't tell; assume the write landed rather than looping forever.
+        return True
+    fields = info[0].get("fields") or {}
+
+    def filled(name):
+        return bool((fields.get(name) or {}).get("value", "").strip())
+
+    return filled(OPTIONS["picture"]) and filled(OPTIONS["audio"])
+
+
 def update_note(note_id, idx, expression=None, original_sentence=None, lines=None, file=None, aid=None, delay=None):
     """Returns True on a confirmed AnkiConnect write, False otherwise (e.g. a
     transient failure while Anki's Browse editor has this exact note open,
@@ -1411,6 +1434,12 @@ def update_note(note_id, idx, expression=None, original_sentence=None, lines=Non
     )
     if not ok:
         debug_log(f"update_note({note_id}): updateNote failed: {result!r}")
+        return False
+
+    if not confirm_note_media(note_id):
+        debug_log(f"update_note({note_id}): updateNote reported success but the "
+                  f"note is still empty (is it open in Anki's Browse editor?); "
+                  f"leaving it pending for a retry")
         return False
 
     print("updated note:", note_id)
@@ -1652,6 +1681,12 @@ def update_note_merged(note_id, indices, expression=None, lines=None, file=None,
         debug_log(f"update_note_merged({note_id}): updateNote failed: {result!r}")
         return False
 
+    if not confirm_note_media(note_id):
+        debug_log(f"update_note_merged({note_id}): updateNote reported success but "
+                  f"the note is still empty (is it open in Anki's Browse editor?); "
+                  f"leaving it pending for a retry")
+        return False
+
     print("updated merged note:", note_id)
     return True
 
@@ -1687,8 +1722,9 @@ def debug_log(msg):
 # every 1.5s would respawn two mpv captures per tick forever, so attempts
 # back off and eventually stop.
 ENRICH_ATTEMPTS = {}
-ENRICH_MAX_ATTEMPTS = 6
+ENRICH_MAX_ATTEMPTS = 15
 ENRICH_BACKOFF_BASE = 3.0
+ENRICH_BACKOFF_MAX = 60.0
 
 # Card id -> the video that was loaded when this pending card was first seen.
 # /check finds candidates with "added:1" (added today), which spans every
@@ -1706,8 +1742,11 @@ def should_attempt_enrich(card_id):
     attempts, last = state
     if attempts >= ENRICH_MAX_ATTEMPTS:
         return False
-    # 3s, 6s, 12s, 24s, ... since the previous failed attempt.
-    wait = ENRICH_BACKOFF_BASE * (2 ** (attempts - 1))
+    # 3s, 6s, 12s, 24s, 48s, then once a minute. Capped rather than doubling
+    # forever so a card blocked by something temporary (a note left open in
+    # Anki's editor, Anki briefly busy) keeps getting retried for ~12 minutes
+    # instead of backing off into effectively never.
+    wait = min(ENRICH_BACKOFF_BASE * (2 ** (attempts - 1)), ENRICH_BACKOFF_MAX)
     return (time.time() - last) >= wait
 
 
