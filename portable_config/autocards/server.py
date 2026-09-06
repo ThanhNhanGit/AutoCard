@@ -378,8 +378,16 @@ def parse_known_decks():
             line = line.strip()
             if not line:
                 continue
-            if ":" in line:
-                deck, fields = line.split(":", 1)
+            # Anki separates subdecks with "::", which collides with the
+            # "Deck: Field" separator: splitting on the first ":" turns
+            # "Archived::Kaishi 1.5k: Word" into deck "Archived" with a
+            # nonsense field name, so every subdeck silently contributes
+            # nothing. Split on the last LONE colon instead, which leaves
+            # "::" runs inside the deck name untouched.
+            seps = list(re.finditer(r"(?<!:):(?!:)", line))
+            if seps:
+                at = seps[-1].start()
+                deck, fields = line[:at], line[at + 1:]
                 add(deck, [f.strip() for f in fields.split(",")])
             else:
                 # deck name only -> reuse the Expression field name
