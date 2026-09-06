@@ -13,6 +13,7 @@ import os
 import re
 import unicodedata
 import zipfile
+import concurrent.futures
 from pathlib import Path
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
@@ -1398,6 +1399,27 @@ def take_audio_merged(src, segments, aid=None):
     return result
 
 
+def capture_pair(shot_args, audio_fn, audio_args):
+    """Run the screenshot and the audio capture at the same time.
+
+    They are two independent mpv processes reading the same file, so running
+    them back to back simply adds their runtimes together. The screenshot is
+    the slow one (~440-620ms on a 1080p HEVC source, most of it process
+    startup and demuxer init that a second process pays over again anyway),
+    and all of it is time the user spends looking at a card whose media
+    fields are still empty. Overlapping them takes the pair down to the cost
+    of the slower half.
+
+    Failures stay contained the way they were: take_screenshot/take_audio
+    already swallow their own errors and answer None, so a result of None
+    still means "no media" to update_note rather than raising here.
+    """
+    with concurrent.futures.ThreadPoolExecutor(max_workers=2) as pool:
+        shot = pool.submit(take_screenshot, *shot_args)
+        audio = pool.submit(audio_fn, *audio_args)
+        return shot.result(), audio.result()
+
+
 def build_card_body(idx, expression=None, original_sentence=None, lines=None, file=None, aid=None, delay=None):
     """Build the sentence HTML (with bolded target) and capture screenshot +
     audio for the line window around idx. Shared by the /check enricher and the
@@ -1442,8 +1464,7 @@ def build_card_body(idx, expression=None, original_sentence=None, lines=None, fi
 
     src = FILE if file is None else file
     aid = AID if aid is None else aid
-    picture = take_screenshot(src, start, end)
-    sound = take_audio(src, start, end, aid=aid)
+    picture, sound = capture_pair((src, start, end), take_audio, (src, start, end, aid))
 
     return sentence, picture, sound
 
@@ -1564,8 +1585,9 @@ def build_merged_card_body(indices, expression=None, lines=None, file=None, aid=
     src = FILE if file is None else file
     aid = AID if aid is None else aid
     # Screenshot from the first selected line (where the target word usually sits).
-    picture = take_screenshot(src, segments[0][0], segments[0][1])
-    sound = take_audio_merged(src, segments, aid=aid)
+    picture, sound = capture_pair(
+        (src, segments[0][0], segments[0][1]), take_audio_merged, (src, segments, aid)
+    )
     return sentence, picture, sound
 
 
