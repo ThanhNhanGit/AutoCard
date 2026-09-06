@@ -545,8 +545,7 @@ def clear_known_cache():
         KNOWN_CONDITION.notify_all()
 
 
-def replace_known_notes(note_infos, field_names):
-    global KNOWN_NOTES, KNOWN_VERSION, KNOWN_READY, KNOWN_LAST_SYNC, KNOWN_LAST_ERROR
+def known_notes_from_infos(note_infos, field_names):
     next_notes = {}
     for note_info in note_infos:
         if not isinstance(note_info, dict):
@@ -557,14 +556,18 @@ def replace_known_notes(note_infos, field_names):
         words = words_from_note_info(note_info, field_names)
         if words:
             next_notes[note_id] = words
+    return next_notes
 
+
+def replace_known_notes(next_notes, warning=""):
+    global KNOWN_NOTES, KNOWN_VERSION, KNOWN_READY, KNOWN_LAST_SYNC, KNOWN_LAST_ERROR
     with KNOWN_CONDITION:
         KNOWN_NOTES = next_notes
         rebuild_known_word_set_locked()
         KNOWN_VERSION += 1
         KNOWN_READY = True
         KNOWN_LAST_SYNC = int(time.time())
-        KNOWN_LAST_ERROR = ""
+        KNOWN_LAST_ERROR = warning
         persist_known_cache_locked()
         KNOWN_CONDITION.notify_all()
 
@@ -634,6 +637,7 @@ def full_sync_known_words():
 
     all_ids = []
     seen = set()
+    deck_ids = []
     for deck, _fields in entries:
         query = deck_query(deck)
         if not query:
@@ -641,6 +645,7 @@ def full_sync_known_words():
         note_ids = invoke("findNotes", query=query)
         if note_ids is None or isinstance(note_ids, Exception):
             raise RuntimeError(str(note_ids or "AnkiConnect is unavailable"))
+        deck_ids.append((deck, list(note_ids)))
         for note_id in note_ids:
             if note_id not in seen:
                 seen.add(note_id)
@@ -655,8 +660,25 @@ def full_sync_known_words():
             raise RuntimeError(str(result or "Unable to read notes from Anki"))
         note_infos.extend(result)
 
-    replace_known_notes(note_infos, field_names)
+    # A configured deck that yields nothing is the one failure Anki reports as
+    # success: renaming or moving a deck ("Kaishi 1.5k" -> "Archived::Kaishi
+    # 1.5k") makes findNotes return [], and a wrong field name makes every note
+    # yield zero words. Either way the known-word set silently loses thousands
+    # of words and every one of them starts painting as unknown, so name the
+    # deck instead of shipping a half-empty cache without a word.
+    next_notes = known_notes_from_infos(note_infos, field_names)
+    problems = []
+    for deck, ids in deck_ids:
+        if not ids:
+            problems.append(f"{deck}: deck not found")
+        elif not any(note_id in next_notes for note_id in ids):
+            problems.append(f"{deck}: no matching field")
+    warning = "; ".join(problems)
+
+    replace_known_notes(next_notes, warning)
     print(f"Known-word cache rebuilt: {len(KNOWN_WORDS)} words from {len(all_ids)} notes")
+    if warning:
+        print(f"Known-word cache warning: {warning}")
 
 
 def start_known_rebuild():
