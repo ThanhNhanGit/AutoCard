@@ -861,7 +861,14 @@
           refreshHighlighting();
 
           updateInterval = setInterval(update, 250);
-          checkInterval = setInterval(check, 1500);
+          // 500ms, not 1500ms: this poll is the ONLY thing that notices a
+          // newly mined card, so half the interval is dead time the user
+          // spends staring at empty media fields -- 750ms of the ~1500ms it
+          // used to take was pure waiting. A pass that finds nothing costs
+          // one findCards (~30ms), and check() drops overlapping passes on a
+          // non-blocking lock, so polling faster buys latency without piling
+          // work onto Anki.
+          checkInterval = setInterval(check, 500);
         });
     }
 
